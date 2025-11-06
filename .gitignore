@@ -1,0 +1,56 @@
+# ---------------------------
+# Python / Streamlit
+# ---------------------------
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.sqlite3
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.streamlit/
+.env
+.env.*
+
+# ---------------------------
+# Node / React Frontend
+# ---------------------------
+bowtie_flow_component/frontend/node_modules/
+bowtie_flow_component/frontend/.parcel-cache/
+bowtie_flow_component/frontend/.cache/
+bowtie_flow_component/frontend/dist/
+bowtie_flow_component/frontend/.vite/
+bowtie_flow_component/frontend/.next/
+bowtie_flow_component/frontend/build/
+
+# ---------------------------
+# uv / Pip / Dependencies
+# ---------------------------
+uv.lock
+poetry.lock
+Pipfile.lock
+requirements.txt~
+__pypackages__/
+
+# ---------------------------
+# OS / IDE / Editor Files
+# ---------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ---------------------------
+# Temporary / Generated
+# ---------------------------
+*.tmp
+*.bak
+*.orig
+*.old
+*.json~
+*.ipynb_checkpoints/

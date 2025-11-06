@@ -1,0 +1,17 @@
+{
+  "name": "bowtie-flow-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "parcel index.html --port 1234"
+  },
+  "dependencies": {
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0",
+    "reactflow": "^11.10.0",
+    "streamlit-component-lib": "^2.0.0"
+  },
+  "devDependencies": {
+    "parcel": "^2.0.0"
+  }
+}
