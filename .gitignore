@@ -21,7 +21,7 @@ __pycache__/
 bowtie_flow_component/frontend/node_modules/
 bowtie_flow_component/frontend/.parcel-cache/
 bowtie_flow_component/frontend/.cache/
-bowtie_flow_component/frontend/dist/
+#bowtie_flow_component/frontend/dist/
 bowtie_flow_component/frontend/.vite/
 bowtie_flow_component/frontend/.next/
 bowtie_flow_component/frontend/build/

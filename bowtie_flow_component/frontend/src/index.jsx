@@ -18,58 +18,78 @@ import {
 } from "streamlit-component-lib";
 
 /**
- * ---------- Risk helpers ----------
+ * ---------- Pulsing CSS for breached Top Event ----------
  */
 
-function riskColor(risk) {
-  if (risk >= 20) return "#fecaca"; // red-ish
-  if (risk >= 12) return "#fde68a"; // amber
-  return "#dcfce7"; // green
+const PULSE_STYLE_ID = "bowtie-top-pulse-style";
+
+function injectPulseCss() {
+  if (typeof document === "undefined") return;
+  if (document.getElementById(PULSE_STYLE_ID)) return;
+
+  const style = document.createElement("style");
+  style.id = PULSE_STYLE_ID;
+  style.innerHTML = `
+    @keyframes bowtie-pulse-red {
+      0% {
+        box-shadow: 0 0 0 0 rgba(248, 113, 113, 0.9);
+      }
+      70% {
+        box-shadow: 0 0 0 16px rgba(248, 113, 113, 0);
+      }
+      100% {
+        box-shadow: 0 0 0 0 rgba(248, 113, 113, 0);
+      }
+    }
+
+    .rf-top-pulse {
+      animation: bowtie-pulse-red 1.6s infinite;
+    }
+  `;
+  document.head.appendChild(style);
 }
 
-function combinedEff(effsPct) {
-  if (!effsPct || effsPct.length === 0) return 0.0;
-  const effs = effsPct.map((x) => {
-    let v = parseInt(x, 10);
-    if (Number.isNaN(v)) v = 0;
-    if (v < 0) v = 0;
-    if (v > 100) v = 100;
-    return v / 100.0;
-  });
-  let p = 1.0;
-  effs.forEach((e) => {
-    p *= 1 - e;
-  });
-  return 1 - p;
-}
+/**
+ * ---------- Metadata helpers ----------
+ */
 
 function ensureMeta(node) {
   if (!node.data) node.data = {};
   if (!node.data.meta) node.data.meta = {};
   const meta = node.data.meta;
 
-  if (meta.severity == null) meta.severity = 3;
-  if (meta.likelihood == null) meta.likelihood = 3;
-
-  if (meta.kind === "barrier") {
-    if (meta.barrierType == null) meta.barrierType = "preventive";
-    if (meta.effectiveness == null) meta.effectiveness = 0;
+  if (!meta.kind && typeof node.id === "string") {
+    if (node.id.startsWith("threat_")) meta.kind = "threat";
+    else if (node.id.startsWith("conseq_")) meta.kind = "consequence";
+    else if (node.id.startsWith("barrier_")) meta.kind = "barrier";
+    else if (node.id.startsWith("center_")) meta.kind = "center";
   }
 
-  const base = Number(meta.severity) * Number(meta.likelihood);
-  meta.base_risk = base;
-  if (meta.current_risk == null) meta.current_risk = base;
-  if (meta.residual_risk == null) meta.residual_risk = base;
+  if (meta.kind === "barrier") {
+    if (!meta.barrierType) meta.barrierType = "preventive";
+    if (meta.failed == null) meta.failed = false;
+  }
 
   if (!node.data.baseLabel) {
     node.data.baseLabel = node.data.label || "";
   }
+
+  if (meta.breached == null) {
+    meta.breached = false;
+  }
 }
 
 /**
- * Core risk engine – only counts threats that actually connect to Top Event
+ * Core “breach” engine:
+ * - If ALL barriers on a Threat → Top Event path are failed (or there are none),
+ *   that path is breached: edges turn red, Threat + Top Event flagged.
+ * - If Top Event is breached, propagate from center → Consequences:
+ *   - Edges go red until they hit a mitigative barrier.
+ *   - If mitigative barrier is active → block there.
+ *   - If mitigative barrier failed → continue to Consequence and mark it red.
  */
-function computeAggregatedRisk(nodesIn, edgesIn) {
+function computeFailureHighlights(nodesIn, edgesIn) {
+  // Deep-ish clone nodes and edges so we don't mutate original references
   const nodes = (nodesIn || []).map((n) => ({
     ...n,
     data: {
@@ -77,26 +97,21 @@ function computeAggregatedRisk(nodesIn, edgesIn) {
       meta: { ...((n.data || {}).meta || {}) },
     },
     style: { ...(n.style || {}) },
+    className: n.className || "",
   }));
-  const edges = (edgesIn || []).map((e) => ({ ...e }));
+
+  const edges = (edgesIn || []).map((e) => ({
+    ...e,
+    style: { ...(e.style || {}) },
+  }));
 
   const nodesById = {};
   nodes.forEach((n) => {
+    ensureMeta(n);
+    // reset breach flag; will be recomputed
+    n.data.meta.breached = false;
     nodesById[n.id] = n;
   });
-
-  const outEdges = {};
-  const inEdges = {};
-  nodes.forEach((n) => {
-    outEdges[n.id] = [];
-    inEdges[n.id] = [];
-  });
-  edges.forEach((e) => {
-    if (outEdges[e.source]) outEdges[e.source].push(e);
-    if (inEdges[e.target]) inEdges[e.target].push(e);
-  });
-
-  nodes.forEach((n) => ensureMeta(n));
 
   // Handle positions / handle sides
   nodes.forEach((n) => {
@@ -123,167 +138,291 @@ function computeAggregatedRisk(nodesIn, edgesIn) {
   const centerCandidates = nodes.filter(
     (n) => typeof n.id === "string" && n.id.startsWith("center_")
   );
-
   const centerId =
     centerCandidates.length > 0
       ? centerCandidates[centerCandidates.length - 1].id
       : null;
 
-  // ---------- 1) Threat residuals (preventive barriers act here only) ----------
-  const threatResiduals = {};
-  nodes.forEach((n) => {
-    if (typeof n.id !== "string" || !n.id.startsWith("threat_")) return;
-
-    const meta = n.data.meta;
-    const base = Number(meta.severity) * Number(meta.likelihood);
-
-    const ownedBarriers = new Set();
-    (outEdges[n.id] || []).forEach((e) => {
-      const tgt = nodesById[e.target];
-      if (tgt && typeof tgt.id === "string" && tgt.id.startsWith("barrier_")) {
-        ownedBarriers.add(tgt.id);
-      }
-    });
-
-    const effs = [];
-    ownedBarriers.forEach((bid) => {
-      const bnode = nodesById[bid];
-      if (!bnode) return;
-      const bmeta = (bnode.data && bnode.data.meta) || {};
-      if ((bmeta.barrierType || "preventive") !== "preventive") return;
-      effs.push(bmeta.effectiveness || 0);
-    });
-
-    const combinedPrev = combinedEff(effs);
-    const residual = base * (1 - combinedPrev);
-
-    meta.base_risk = base;
-    meta.current_risk = residual;
-    meta.residual_risk = residual;
-
-    n.style = { ...(n.style || {}), background: riskColor(residual) };
-    const baseLabel = n.data.baseLabel || n.data.label || "";
-    n.data.label = `${baseLabel} | Base ${base} → Residual ${Math.round(
-      residual
-    )}`;
-
-    threatResiduals[n.id] = residual;
+  // Build adjacency
+  const outEdges = {};
+  edges.forEach((e) => {
+    if (!outEdges[e.source]) outEdges[e.source] = [];
+    outEdges[e.source].push(e);
   });
 
-  // ---------- 1b) Only sum threats connected (via any path) to Top Event ----------
-  const connectedThreats = new Set();
-  if (centerId && nodesById[centerId]) {
-    const visited = new Set();
-    const stack = [centerId];
+  // Reset all edge styling (we'll re-apply hot styling)
+  edges.forEach((e) => {
+    if (e.style) {
+      const s = { ...e.style };
+      delete s.stroke;
+      delete s.strokeWidth;
+      e.style = s;
+    }
+    e.animated = false;
+  });
 
-    while (stack.length > 0) {
-      const nid = stack.pop();
-      if (visited.has(nid)) continue;
-      visited.add(nid);
+  const hotEdgeIds = new Set();
+  const hotThreatIds = new Set();
+  const hotConsequenceIds = new Set();
+  let centerIsHot = false;
 
-      (inEdges[nid] || []).forEach((e) => {
-        const sid = e.source;
-        if (!visited.has(sid)) {
-          stack.push(sid);
+  // ---------- 1) Threat → Top Event breach detection ----------
+  function processThreat(threatId) {
+    let anyBreach = false;
+
+    function dfs(currentId, pathEdgeIds, barrierIds, visited) {
+      if (currentId === centerId) {
+        // Evaluate this path: if no barriers OR all barriers failed → breach
+        let allFailed = true;
+
+        if (barrierIds.length > 0) {
+          for (const bId of barrierIds) {
+            const bNode = nodesById[bId];
+            const bMeta = (bNode && bNode.data && bNode.data.meta) || {};
+            if (!bMeta.failed) {
+              allFailed = false;
+              break;
+            }
+          }
+        } else {
+          // No barriers at all – treat as unprotected path
+          allFailed = true;
         }
-      });
+
+        if (allFailed) {
+          anyBreach = true;
+          pathEdgeIds.forEach((eid) => hotEdgeIds.add(eid));
+          centerIsHot = true;
+        }
+        return;
+      }
+
+      const nextEdges = outEdges[currentId] || [];
+      for (const e of nextEdges) {
+        const nextId = e.target;
+        if (!nextId || visited.has(nextId)) continue;
+
+        const nextVisited = new Set(visited);
+        nextVisited.add(nextId);
+
+        let nextBarrierIds = barrierIds;
+        if (typeof nextId === "string" && nextId.startsWith("barrier_")) {
+          nextBarrierIds = [...barrierIds, nextId];
+        }
+
+        dfs(nextId, [...pathEdgeIds, e.id], nextBarrierIds, nextVisited);
+      }
     }
 
-    visited.forEach((nid) => {
-      if (typeof nid === "string" && nid.startsWith("threat_")) {
-        connectedThreats.add(nid);
+    dfs(threatId, [], [], new Set([threatId]));
+
+    if (anyBreach) {
+      hotThreatIds.add(threatId);
+    }
+  }
+
+  nodes.forEach((n) => {
+    if (typeof n.id === "string" && n.id.startsWith("threat_")) {
+      processThreat(n.id);
+    }
+  });
+
+  // Mark threat→center edges hot
+  edges.forEach((e) => {
+    if (hotEdgeIds.has(e.id)) {
+      e.style = {
+        ...(e.style || {}),
+        stroke: "#f97373",
+        strokeWidth: 3,
+      };
+      e.animated = true;
+    }
+  });
+
+  // ---------- 2) Center → Consequences (with mitigative barriers) ----------
+  if (centerIsHot && centerId && nodesById[centerId]) {
+    function dfsFromCenter(currentId, visited) {
+      const nextEdges = outEdges[currentId] || [];
+      for (const e of nextEdges) {
+        const nextId = e.target;
+        if (!nextId || visited.has(nextId)) continue;
+
+        const nextNode = nodesById[nextId];
+        if (!nextNode) continue;
+        const meta = (nextNode.data && nextNode.data.meta) || {};
+
+        const nextVisited = new Set(visited);
+        nextVisited.add(nextId);
+
+        const kind = meta.kind || "";
+        const barrierType = meta.barrierType || "preventive";
+
+        // Always color the edge from the current node if Top Event is breached
+        hotEdgeIds.add(e.id);
+
+        if (kind === "barrier" && barrierType === "mitigative") {
+          // Threat reaches mitigative barrier; edge to barrier is hot.
+          // If barrier failed, continue past it; if active, stop here.
+          if (meta.failed) {
+            dfsFromCenter(nextId, nextVisited);
+          }
+        } else if (kind === "consequence") {
+          // Threat reaches consequence node → edge + consequence go red
+          hotConsequenceIds.add(nextId);
+          // Usually a sink; we can stop here.
+        } else {
+          // Other nodes – propagate further
+          dfsFromCenter(nextId, nextVisited);
+        }
       }
-    });
-  } else {
-    Object.keys(threatResiduals).forEach((tid) => connectedThreats.add(tid));
+    }
+
+    dfsFromCenter(centerId, new Set([centerId]));
   }
 
-  const sumThreats = Array.from(connectedThreats).reduce(
-    (acc, tid) => acc + Number(threatResiduals[tid] || 0),
-    0
-  );
+  // Apply all edge highlights (threat→center + center→consq)
+  edges.forEach((e) => {
+    if (hotEdgeIds.has(e.id)) {
+      e.style = {
+        ...(e.style || {}),
+        stroke: "#f97373",
+        strokeWidth: 3,
+      };
+      e.animated = true;
+    }
+  });
 
-  // ---------- 2) Top Event (center) ----------
-  let centerResidual = 0.0;
-  if (centerId && nodesById[centerId]) {
-    const cnode = nodesById[centerId];
-    const cmeta = cnode.data.meta;
+  // ---------- 3) Mark breached nodes in meta ----------
+  hotThreatIds.forEach((tid) => {
+    const tNode = nodesById[tid];
+    if (!tNode || !tNode.data) return;
+    const meta = tNode.data.meta || {};
+    meta.breached = true;
+    tNode.data.meta = meta;
+  });
 
-    const cCurrent = sumThreats;
-    const cResidual = cCurrent;
-
-    cmeta.current_risk = cCurrent;
-    cmeta.residual_risk = cResidual;
-
-    cnode.style = { ...(cnode.style || {}), background: riskColor(cResidual) };
-    const baseLabel = cnode.data.baseLabel || cnode.data.label || "";
-    cnode.data.label = `${baseLabel} | Current Σ threats ${Math.round(
-      cCurrent
-    )}`;
-
-    centerResidual = cResidual;
-  } else {
-    centerResidual = 0.0;
+  if (centerIsHot && nodesById[centerId]) {
+    const cMeta =
+      (nodesById[centerId].data && nodesById[centerId].data.meta) || {};
+    cMeta.breached = true;
+    nodesById[centerId].data.meta = cMeta;
   }
 
-  // ---------- 3) Consequences (mitigative barriers act here) ----------
-  nodes.forEach((n) => {
-    if (typeof n.id !== "string" || !n.id.startsWith("conseq_")) return;
-
-    const meta = n.data.meta;
-    const base = Number(meta.severity) * Number(meta.likelihood);
-
-    const cCurrent = centerResidual * base;
-
-    const effsMit = [];
-    (inEdges[n.id] || []).forEach((e) => {
-      const src = nodesById[e.source];
-      if (!src || typeof src.id !== "string" || !src.id.startsWith("barrier_"))
-        return;
-      const bmeta = (src.data && src.data.meta) || {};
-      if ((bmeta.barrierType || "mitigative") !== "mitigative") return;
-      effsMit.push(bmeta.effectiveness || 0);
-    });
-
-    const combinedMit = combinedEff(effsMit);
-    const residual = cCurrent * (1 - combinedMit);
-
-    meta.base_risk = base;
-    meta.current_risk = cCurrent;
-    meta.residual_risk = residual;
-
-    n.style = { ...(n.style || {}), background: riskColor(residual) };
-    const baseLabel = n.data.baseLabel || n.data.label || "";
-    n.data.label = `${baseLabel} | Base ${base} | Curr from Top ${Math.round(
-      cCurrent
-    )} → Residual ${Math.round(residual)}`;
+  hotConsequenceIds.forEach((cid) => {
+    const cNode = nodesById[cid];
+    if (!cNode || !cNode.data) return;
+    const meta = cNode.data.meta || {};
+    meta.breached = true;
+    cNode.data.meta = meta;
   });
 
-  // ---------- 4) Tint barriers by effectiveness ----------
+  // ---------- 4) Final styling for barriers, threats, center, consequences ----------
   nodes.forEach((n) => {
-    if (typeof n.id !== "string" || !n.id.startsWith("barrier_")) return;
+    const meta = n.data.meta || {};
+    const kind = meta.kind || "";
+    const baseStyle = n.style || {};
 
-    const bmeta = n.data.meta;
-    let beff = parseInt(bmeta.effectiveness || 0, 10);
-    if (Number.isNaN(beff)) beff = 0;
-    if (beff < 0) beff = 0;
-    if (beff > 100) beff = 100;
+    if (kind === "barrier") {
+      const type = meta.barrierType || "preventive";
 
-    let bg = "#fee2e2";
-    if (beff >= 75) bg = "#dcfce7";
-    else if (beff >= 40) bg = "#fde68a";
-
-    n.style = { ...(n.style || {}), background: bg };
-    const baseLabel = n.data.baseLabel || n.data.label || "";
-    const bt = bmeta.barrierType || "preventive";
-    n.data.label = `${baseLabel} | ${bt} ${beff}%`;
+      if (meta.failed) {
+        // Failed barrier – strong red hint
+        n.style = {
+          ...baseStyle,
+          border: "2px solid #f97373",
+          background: "#111827",
+          color: "#f9fafb",
+        };
+      } else {
+        // Active barrier – visually differentiate preventive vs mitigative
+        if (type === "preventive") {
+          n.style = {
+            ...baseStyle,
+            border: "1px solid #22c55e",
+            background: "#022c22",
+            color: "#e5e7eb",
+          };
+        } else {
+          // mitigative
+          n.style = {
+            ...baseStyle,
+            border: "1px dashed #38bdf8",
+            background: "#020617",
+            color: "#e5e7eb",
+          };
+        }
+      }
+    } else if (kind === "center") {
+      if (meta.breached) {
+        // Breached Top Event: red + pulsating
+        n.style = {
+          ...baseStyle,
+          background: "#fecaca",
+          border: "2px solid #b91c1c",
+          color: "#111827",
+        };
+        n.className = `${n.className || ""} rf-top-pulse`.trim();
+      } else {
+        // Safe Top Event: green
+        n.style = {
+          ...baseStyle,
+          background: "#dcfce7",
+          border: "2px solid #16a34a",
+          color: "#064e3b",
+        };
+        // remove pulse class if it was there
+        if (n.className) {
+          n.className = n.className
+            .split(" ")
+            .filter((c) => c !== "rf-top-pulse")
+            .join(" ");
+        }
+      }
+    } else if (kind === "threat") {
+      if (meta.breached) {
+        // Breached threat: reddish
+        n.style = {
+          ...baseStyle,
+          background: "#fee2e2",
+          border: "1px solid #f97373",
+          color: "#111827",
+        };
+      } else {
+        // Normal threat: orangish
+        n.style = {
+          ...baseStyle,
+          background: "#ffedd5",
+          border: "1px solid #fb923c",
+          color: "#7c2d12",
+        };
+      }
+    } else if (kind === "consequence") {
+      if (meta.breached) {
+        // Breached consequence: red-ish
+        n.style = {
+          ...baseStyle,
+          background: "#fecaca",
+          border: "1px solid #b91c1c",
+          color: "#111827",
+        };
+      } else {
+        // Normal consequence: light blue
+        n.style = {
+          ...baseStyle,
+          background: "#e0f2fe",
+          border: "1px solid #38bdf8",
+          color: "#0f172a",
+        };
+      }
+    }
   });
 
-  return nodes;
+  return { nodes, edges };
 }
 
 /**
- * Collapse engine: hide all downstream barriers and add synthetic Threat → Top Event edges
+ * Collapse engine: hide all downstream barriers and add synthetic Threat → Top Event edges.
+ * If a threat has breached the Top Event, the synthetic edge stays red.
  */
 function applyCollapse(nodesIn, edgesIn, collapsedThreatIds) {
   const nodes = (nodesIn || []).map((n) => ({ ...n }));
@@ -363,13 +502,28 @@ function applyCollapse(nodesIn, edgesIn, collapsedThreatIds) {
           e.data.syntheticCollapse
       );
       if (!alreadyHas) {
-        viewEdges.push({
+        const threatNode = nodesById[threatId];
+        const tMeta =
+          threatNode && threatNode.data ? threatNode.data.meta || {} : {};
+        const breached = !!tMeta.breached;
+
+        const collapseEdge = {
           id: `collapse_${threatId}_${centerId}`,
           source: threatId,
           target: centerId,
           type: "default",
           data: { syntheticCollapse: true },
-        });
+        };
+
+        if (breached) {
+          collapseEdge.style = {
+            stroke: "#f97373",
+            strokeWidth: 3,
+          };
+          collapseEdge.animated = true;
+        }
+
+        viewEdges.push(collapseEdge);
       }
     }
   });
@@ -398,7 +552,7 @@ class BowtieFlowComponent extends StreamlitComponentBase {
     this.state = {
       nodes: [],
       edges: [], // view edges for ReactFlow
-      rawEdges: [], // canonical edges
+      rawEdges: [], // canonical edges (structure)
       rfInstance: null,
       contextMenu: {
         visible: false,
@@ -408,19 +562,14 @@ class BowtieFlowComponent extends StreamlitComponentBase {
         kind: "threat",
         label: "",
         barrierType: "preventive",
-        effectiveness: 50,
-        severity: 3,
-        likelihood: 3,
       },
       editPanel: {
         visible: false,
         nodeId: null,
         kind: "",
         label: "",
-        severity: 3,
-        likelihood: 3,
         barrierType: "preventive",
-        effectiveness: 50,
+        failed: false,
       },
       collapsedThreats: [],
       nodeMenu: {
@@ -430,6 +579,8 @@ class BowtieFlowComponent extends StreamlitComponentBase {
         nodeId: null,
         canCollapse: false,
         isCollapsed: false,
+        isBarrier: false,
+        barrierFailed: false,
       },
       edgeMenu: {
         visible: false,
@@ -438,7 +589,13 @@ class BowtieFlowComponent extends StreamlitComponentBase {
         edgeId: null,
         canDelete: true,
         isSynthetic: false,
+        canInsert: false,
+        insertPosition: null,
+        sourceId: null,
+        targetId: null,
       },
+      // NEW: tracks when we're inserting a barrier into an existing edge
+      pendingInsertFromEdge: null,
     };
 
     this.syncFromProps = this.syncFromProps.bind(this);
@@ -466,9 +623,11 @@ class BowtieFlowComponent extends StreamlitComponentBase {
     this.onEdgeContextMenu = this.onEdgeContextMenu.bind(this);
     this.handleEdgeMenuClose = this.handleEdgeMenuClose.bind(this);
     this.handleEdgeDelete = this.handleEdgeDelete.bind(this);
+    this.handleEdgeInsertNode = this.handleEdgeInsertNode.bind(this);
   }
 
   componentDidMount() {
+    injectPulseCss();
     this.syncFromProps();
   }
 
@@ -478,16 +637,16 @@ class BowtieFlowComponent extends StreamlitComponentBase {
         ? collapsedOverride
         : this.state.collapsedThreats;
 
-    const riskNodes = computeAggregatedRisk(rawNodes, rawEdges);
+    const annotated = computeFailureHighlights(rawNodes, rawEdges);
 
     if (!collapsedThreats || collapsedThreats.length === 0) {
-      riskNodes.forEach((n) => {
+      annotated.nodes.forEach((n) => {
         n.hidden = false;
       });
-      return { nodes: riskNodes, edges: rawEdges };
+      return { nodes: annotated.nodes, edges: annotated.edges };
     }
 
-    return applyCollapse(riskNodes, rawEdges, collapsedThreats);
+    return applyCollapse(annotated.nodes, annotated.edges, collapsedThreats);
   }
 
   syncFromProps() {
@@ -608,9 +767,6 @@ class BowtieFlowComponent extends StreamlitComponentBase {
         label: "",
         kind: "threat",
         barrierType: "preventive",
-        effectiveness: 50,
-        severity: 3,
-        likelihood: 3,
       },
       nodeMenu: { ...state.nodeMenu, visible: false },
       edgeMenu: { ...state.edgeMenu, visible: false },
@@ -649,19 +805,12 @@ class BowtieFlowComponent extends StreamlitComponentBase {
     this.setState((state) => ({
       ...state,
       contextMenu: { ...state.contextMenu, visible: false },
+      pendingInsertFromEdge: null,
     }));
   }
 
   handleAddNodeFromMenu() {
-    const {
-      position,
-      kind,
-      label,
-      barrierType,
-      effectiveness,
-      severity,
-      likelihood,
-    } = this.state.contextMenu;
+    const { position, kind, label, barrierType } = this.state.contextMenu;
 
     const trimmed = label.trim();
     const displayLabel = trimmed || "New node";
@@ -675,16 +824,12 @@ class BowtieFlowComponent extends StreamlitComponentBase {
       baseLabel = `⚠ Threat: ${displayLabel}`;
       meta = {
         kind: "threat",
-        severity: Number(severity) || 3,
-        likelihood: Number(likelihood) || 3,
       };
     } else if (kind === "consequence") {
       idPrefix = "conseq";
       baseLabel = `❗ Consequence: ${displayLabel}`;
       meta = {
         kind: "consequence",
-        severity: Number(severity) || 3,
-        likelihood: Number(likelihood) || 3,
       };
     } else if (kind === "barrier") {
       idPrefix = "barrier";
@@ -692,7 +837,7 @@ class BowtieFlowComponent extends StreamlitComponentBase {
       meta = {
         kind: "barrier",
         barrierType,
-        effectiveness: Number(effectiveness) || 0,
+        failed: false,
       };
     } else if (kind === "center") {
       idPrefix = "center";
@@ -702,8 +847,9 @@ class BowtieFlowComponent extends StreamlitComponentBase {
       };
     }
 
+    const newNodeId = `${idPrefix}_${Date.now()}`;
     const newNode = {
-      id: `${idPrefix}_${Date.now()}`,
+      id: newNodeId,
       position,
       data: {
         label: baseLabel,
@@ -715,13 +861,55 @@ class BowtieFlowComponent extends StreamlitComponentBase {
 
     this.setState(
       (state) => {
-        const updatedNodes = [...state.nodes, newNode];
-        const processed = this.recalcNodes(updatedNodes, state.rawEdges);
+        let updatedNodes = [...state.nodes, newNode];
+        let updatedRawEdges = state.rawEdges;
+
+        // If we are inserting this barrier into an existing edge, split that edge
+        if (
+          state.pendingInsertFromEdge &&
+          kind === "barrier" // only edge-insert makes sense for a barrier
+        ) {
+          const { edgeId, sourceId, targetId } = state.pendingInsertFromEdge;
+
+          const oldEdge = updatedRawEdges.find((e) => e.id === edgeId);
+          updatedRawEdges = updatedRawEdges.filter((e) => e.id !== edgeId);
+
+          const edgeBase = oldEdge || { type: "default" };
+
+          const edge1 = {
+            ...edgeBase,
+            id: `${edgeId}_a_${Date.now()}`,
+            source: sourceId,
+            target: newNodeId,
+          };
+          const edge2 = {
+            ...edgeBase,
+            id: `${edgeId}_b_${Date.now()}`,
+            source: newNodeId,
+            target: targetId,
+          };
+
+          // remove syntheticCollapse flag from new edges if present
+          if (edge1.data && edge1.data.syntheticCollapse) {
+            edge1.data = { ...edge1.data };
+            delete edge1.data.syntheticCollapse;
+          }
+          if (edge2.data && edge2.data.syntheticCollapse) {
+            edge2.data = { ...edge2.data };
+            delete edge2.data.syntheticCollapse;
+          }
+
+          updatedRawEdges = [...updatedRawEdges, edge1, edge2];
+        }
+
+        const processed = this.recalcNodes(updatedNodes, updatedRawEdges);
         return {
           ...state,
           nodes: processed.nodes,
           edges: processed.edges,
+          rawEdges: updatedRawEdges,
           contextMenu: { ...state.contextMenu, visible: false },
+          pendingInsertFromEdge: null,
         };
       },
       this.pushToStreamlit
@@ -758,7 +946,7 @@ class BowtieFlowComponent extends StreamlitComponentBase {
     return (
       <div style={menuStyle} onClick={(e) => e.stopPropagation()}>
         <div style={{ fontWeight: 600, marginBottom: "4px" }}>
-          Add node at click
+          Add node
         </div>
 
         <label style={{ display: "block", marginTop: "4px" }}>
@@ -790,39 +978,6 @@ class BowtieFlowComponent extends StreamlitComponentBase {
           />
         </label>
 
-        {(contextMenu.kind === "threat" ||
-          contextMenu.kind === "consequence") && (
-          <>
-            <label style={{ display: "block", marginTop: "4px" }}>
-              Severity (1–5)
-              <input
-                style={inputStyle}
-                type="number"
-                min="1"
-                max="5"
-                value={contextMenu.severity}
-                onChange={(e) =>
-                  this.handleMenuFieldChange("severity", e.target.value)
-                }
-              />
-            </label>
-
-            <label style={{ display: "block", marginTop: "4px" }}>
-              Likelihood (1–5)
-              <input
-                style={inputStyle}
-                type="number"
-                min="1"
-                max="5"
-                value={contextMenu.likelihood}
-                onChange={(e) =>
-                  this.handleMenuFieldChange("likelihood", e.target.value)
-                }
-              />
-            </label>
-          </>
-        )}
-
         {contextMenu.kind === "barrier" && (
           <>
             <label style={{ display: "block", marginTop: "4px" }}>
@@ -837,23 +992,6 @@ class BowtieFlowComponent extends StreamlitComponentBase {
                 <option value="preventive">Preventive</option>
                 <option value="mitigative">Mitigative</option>
               </select>
-            </label>
-
-            <label style={{ display: "block", marginTop: "4px" }}>
-              Effectiveness (%)
-              <input
-                style={inputStyle}
-                type="number"
-                min="0"
-                max="100"
-                value={contextMenu.effectiveness}
-                onChange={(e) =>
-                  this.handleMenuFieldChange(
-                    "effectiveness",
-                    e.target.value
-                  )
-                }
-              />
             </label>
           </>
         )}
@@ -921,11 +1059,8 @@ class BowtieFlowComponent extends StreamlitComponentBase {
       .replace(/^🛡 Barrier:\s*/i, "")
       .replace(/^🎯\s*/, "");
 
-    const severity = meta.severity != null ? meta.severity : 3;
-    const likelihood = meta.likelihood != null ? meta.likelihood : 3;
     const barrierType = meta.barrierType || "preventive";
-    const effectiveness =
-      meta.effectiveness != null ? meta.effectiveness : 50;
+    const failed = !!meta.failed;
 
     this.setState((state) => ({
       ...state,
@@ -934,10 +1069,8 @@ class BowtieFlowComponent extends StreamlitComponentBase {
         nodeId: node.id,
         kind: kind || "node",
         label: cleaned,
-        severity,
-        likelihood,
         barrierType,
-        effectiveness,
+        failed,
       },
     }));
   }
@@ -959,15 +1092,7 @@ class BowtieFlowComponent extends StreamlitComponentBase {
   handleEditSave() {
     this.setState(
       (state) => {
-        const {
-          nodeId,
-          kind,
-          label,
-          severity,
-          likelihood,
-          barrierType,
-          effectiveness,
-        } = state.editPanel;
+        const { nodeId, kind, label, barrierType, failed } = state.editPanel;
 
         const cleanedLabel = label.trim() || "Node";
 
@@ -980,18 +1105,14 @@ class BowtieFlowComponent extends StreamlitComponentBase {
           if (kind === "threat") {
             baseLabel = `⚠ Threat: ${cleanedLabel}`;
             meta.kind = "threat";
-            meta.severity = Number(severity) || 3;
-            meta.likelihood = Number(likelihood) || 3;
           } else if (kind === "consequence") {
             baseLabel = `❗ Consequence: ${cleanedLabel}`;
             meta.kind = "consequence";
-            meta.severity = Number(severity) || 3;
-            meta.likelihood = Number(likelihood) || 3;
           } else if (kind === "barrier") {
             baseLabel = `🛡 Barrier: ${cleanedLabel}`;
             meta.kind = "barrier";
             meta.barrierType = barrierType;
-            meta.effectiveness = Number(effectiveness) || 0;
+            meta.failed = !!failed;
           } else if (kind === "center") {
             baseLabel = `🎯 ${cleanedLabel}`;
             meta.kind = "center";
@@ -1079,39 +1200,6 @@ class BowtieFlowComponent extends StreamlitComponentBase {
           />
         </label>
 
-        {(editPanel.kind === "threat" ||
-          editPanel.kind === "consequence") && (
-          <>
-            <label style={{ display: "block", marginTop: "4px" }}>
-              Severity (1–5)
-              <input
-                style={inputStyle}
-                type="number"
-                min="1"
-                max="5"
-                value={editPanel.severity}
-                onChange={(e) =>
-                  this.handleEditFieldChange("severity", e.target.value)
-                }
-              />
-            </label>
-
-            <label style={{ display: "block", marginTop: "4px" }}>
-              Likelihood (1–5)
-              <input
-                style={inputStyle}
-                type="number"
-                min="1"
-                max="5"
-                value={editPanel.likelihood}
-                onChange={(e) =>
-                  this.handleEditFieldChange("likelihood", e.target.value)
-                }
-              />
-            </label>
-          </>
-        )}
-
         {editPanel.kind === "barrier" && (
           <>
             <label style={{ display: "block", marginTop: "4px" }}>
@@ -1129,20 +1217,20 @@ class BowtieFlowComponent extends StreamlitComponentBase {
             </label>
 
             <label style={{ display: "block", marginTop: "4px" }}>
-              Effectiveness (%)
-              <input
+              Status
+              <select
                 style={inputStyle}
-                type="number"
-                min="0"
-                max="100"
-                value={editPanel.effectiveness}
+                value={editPanel.failed ? "failed" : "active"}
                 onChange={(e) =>
                   this.handleEditFieldChange(
-                    "effectiveness",
-                    e.target.value
+                    "failed",
+                    e.target.value === "failed"
                   )
                 }
-              />
+              >
+                <option value="active">Active (working)</option>
+                <option value="failed">Failed</option>
+              </select>
             </label>
           </>
         )}
@@ -1188,7 +1276,7 @@ class BowtieFlowComponent extends StreamlitComponentBase {
     );
   }
 
-  // ---------- Node context menu (collapse / delete) ----------
+  // ---------- Node context menu (collapse / delete / barrier failed) ----------
 
   onNodeContextMenu(event, node) {
     event.preventDefault();
@@ -1205,6 +1293,8 @@ class BowtieFlowComponent extends StreamlitComponentBase {
 
     const isThreat =
       typeof node.id === "string" && node.id.startsWith("threat_");
+    const isBarrier =
+      typeof node.id === "string" && node.id.startsWith("barrier_");
 
     const centerCandidates = nodes.filter(
       (n) => typeof n.id === "string" && n.id.startsWith("center_")
@@ -1247,6 +1337,10 @@ class BowtieFlowComponent extends StreamlitComponentBase {
     }
 
     const isCollapsed = collapsedThreats.includes(node.id);
+    const barrierFailed =
+      isBarrier && node.data && node.data.meta
+        ? !!node.data.meta.failed
+        : false;
 
     this.setState((state) => ({
       ...state,
@@ -1258,6 +1352,8 @@ class BowtieFlowComponent extends StreamlitComponentBase {
         nodeId: node.id,
         canCollapse,
         isCollapsed,
+        isBarrier,
+        barrierFailed,
       },
       contextMenu: { ...state.contextMenu, visible: false },
       edgeMenu: { ...state.edgeMenu, visible: false },
@@ -1336,6 +1432,32 @@ class BowtieFlowComponent extends StreamlitComponentBase {
         },
         this.pushToStreamlit
       );
+    } else if (action === "toggleBarrierFailed") {
+      this.setState(
+        (state) => {
+          const nodeId = state.nodeMenu.nodeId;
+          if (!nodeId) return state;
+
+          const updatedNodes = state.nodes.map((n) => {
+            if (n.id !== nodeId) return n;
+            const meta = { ...((n.data && n.data.meta) || {}) };
+            meta.kind = meta.kind || "barrier";
+            meta.failed = !meta.failed;
+            const data = { ...(n.data || {}), meta };
+            return { ...n, data };
+          });
+
+          const processed = this.recalcNodes(updatedNodes, state.rawEdges);
+
+          return {
+            ...state,
+            nodes: processed.nodes,
+            edges: processed.edges,
+            nodeMenu: { ...state.nodeMenu, visible: false },
+          };
+        },
+        this.pushToStreamlit
+      );
     }
   }
 
@@ -1360,7 +1482,9 @@ class BowtieFlowComponent extends StreamlitComponentBase {
 
     return (
       <div style={menuStyle} onClick={(e) => e.stopPropagation()}>
-        <div style={{ fontWeight: 600, marginBottom: "4px" }}>Node actions</div>
+        <div style={{ fontWeight: 600, marginBottom: "4px" }}>
+          Node actions
+        </div>
 
         {nodeMenu.canCollapse ? (
           <button
@@ -1389,6 +1513,27 @@ class BowtieFlowComponent extends StreamlitComponentBase {
           >
             No collapsible path from this node to Top Event.
           </div>
+        )}
+
+        {nodeMenu.isBarrier && (
+          <button
+            style={{
+              width: "100%",
+              padding: "4px 6px",
+              fontSize: "0.8rem",
+              background: nodeMenu.barrierFailed ? "#16a34a" : "#b91c1c",
+              border: "none",
+              borderRadius: "4px",
+              color: "white",
+              cursor: "pointer",
+              marginBottom: "6px",
+            }}
+            onClick={() => this.handleNodeMenuAction("toggleBarrierFailed")}
+          >
+            {nodeMenu.barrierFailed
+              ? "Mark barrier as active"
+              : "Mark barrier as failed"}
+          </button>
         )}
 
         <button
@@ -1428,7 +1573,7 @@ class BowtieFlowComponent extends StreamlitComponentBase {
     );
   }
 
-  // ---------- Edge context menu (delete connection) ----------
+  // ---------- Edge context menu (delete connection / insert node) ----------
 
   onEdgeContextMenu(event, edge) {
     event.preventDefault();
@@ -1443,6 +1588,19 @@ class BowtieFlowComponent extends StreamlitComponentBase {
 
     const isSynthetic = !!(edge.data && edge.data.syntheticCollapse);
 
+    // Compute midpoint between source/target nodes (in flow coordinates)
+    const { nodes } = this.state;
+    const srcNode = nodes.find((n) => n.id === edge.source);
+    const tgtNode = nodes.find((n) => n.id === edge.target);
+    let insertPosition = null;
+
+    if (srcNode && tgtNode) {
+      insertPosition = {
+        x: (srcNode.position.x + tgtNode.position.x) / 2,
+        y: (srcNode.position.y + tgtNode.position.y) / 2,
+      };
+    }
+
     this.setState((state) => ({
       ...state,
       edgeMenu: {
@@ -1453,6 +1611,10 @@ class BowtieFlowComponent extends StreamlitComponentBase {
         edgeId: edge.id,
         canDelete: !isSynthetic,
         isSynthetic,
+        canInsert: !!insertPosition && !isSynthetic,
+        insertPosition,
+        sourceId: edge.source,
+        targetId: edge.target,
       },
       nodeMenu: { ...state.nodeMenu, visible: false },
       contextMenu: { ...state.contextMenu, visible: false },
@@ -1487,6 +1649,41 @@ class BowtieFlowComponent extends StreamlitComponentBase {
     );
   }
 
+  handleEdgeInsertNode() {
+    this.setState((state) => {
+      const {
+        canInsert,
+        insertPosition,
+        edgeId,
+        sourceId,
+        targetId,
+        x,
+        y,
+      } = state.edgeMenu;
+
+      if (!canInsert || !insertPosition || !edgeId || !sourceId || !targetId) {
+        return state;
+      }
+
+      // Open the same "add barrier" context menu, but in "insert into this edge" mode
+      return {
+        ...state,
+        pendingInsertFromEdge: { edgeId, sourceId, targetId },
+        edgeMenu: { ...state.edgeMenu, visible: false },
+        contextMenu: {
+          ...state.contextMenu,
+          visible: true,
+          x,
+          y,
+          position: insertPosition,
+          kind: "barrier",
+          label: "",
+          barrierType: "preventive",
+        },
+      };
+    });
+  }
+
   renderEdgeMenu() {
     const { edgeMenu } = this.state;
     if (!edgeMenu.visible) return null;
@@ -1501,7 +1698,7 @@ class BowtieFlowComponent extends StreamlitComponentBase {
       borderRadius: "8px",
       boxShadow: "0 8px 16px rgba(0,0,0,0.35)",
       zIndex: 16,
-      minWidth: "200px",
+      minWidth: "220px",
       fontSize: "0.85rem",
       border: "1px solid rgba(255,255,255,0.08)",
     };
@@ -1511,6 +1708,25 @@ class BowtieFlowComponent extends StreamlitComponentBase {
         <div style={{ fontWeight: 600, marginBottom: "4px" }}>
           Connection actions
         </div>
+
+        {edgeMenu.canInsert && (
+          <button
+            style={{
+              width: "100%",
+              padding: "4px 6px",
+              fontSize: "0.8rem",
+              background: "#10b981",
+              border: "none",
+              borderRadius: "4px",
+              color: "white",
+              cursor: "pointer",
+              marginBottom: "6px",
+            }}
+            onClick={this.handleEdgeInsertNode}
+          >
+            Insert barrier node here
+          </button>
+        )}
 
         {edgeMenu.canDelete ? (
           <button
@@ -1530,7 +1746,9 @@ class BowtieFlowComponent extends StreamlitComponentBase {
             Delete connection
           </button>
         ) : (
-          <div style={{ fontSize: "0.8rem", opacity: 0.7, marginBottom: "4px" }}>
+          <div
+            style={{ fontSize: "0.8rem", opacity: 0.7, marginBottom: "4px" }}
+          >
             This is a collapse shortcut. Expand the threat node to remove it.
           </div>
         )}
