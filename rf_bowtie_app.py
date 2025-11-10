@@ -8,8 +8,8 @@ import streamlit as st
 
 from bowtie_flow_component import bowtie_flow
 
-st.set_page_config(page_title="Bow-Tie ReactFlow Prototype", layout="wide")
-st.title("Bow-Tie Builder — React Flow Component with Risk Logic")
+st.set_page_config(page_title="Bowtie Diagram Builder", layout="wide")
+st.title("Bowtie Diagram Builder")
 
 
 def uid(prefix: str = "n") -> str:
@@ -48,44 +48,9 @@ if "rf_nodes" not in st.session_state:
 if "rf_edges" not in st.session_state:
     st.session_state.rf_edges = []
 
+# Convenience variables
 nodes = st.session_state.rf_nodes
 edges = st.session_state.rf_edges
-
-# ---------- Save / Load controls (replaces Graph JSON panel) ----------
-
-st.subheader("Save / Load bowtie")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    payload = {"nodes": nodes, "edges": edges}
-    json_bytes = json.dumps(payload, indent=2).encode("utf-8")
-
-    # Build a data: URL so we don't use Streamlit's media storage
-    b64 = base64.b64encode(json_bytes).decode("utf-8")
-    href = (
-        f'<a href="data:application/json;base64,{b64}" '
-        f'download="bowtie_graph.json">💾 Download bowtie JSON</a>'
-    )
-    st.markdown(href, unsafe_allow_html=True)
-    st.caption("Click to download the current bowtie as JSON.")
-
-
-with col2:
-    uploaded = st.file_uploader(
-        "Upload bowtie JSON",
-        type=["json"],
-        help="Upload a previously saved bowtie_graph.json file.",
-    )
-    if uploaded is not None:
-        try:
-            loaded = json.load(uploaded)
-            st.session_state.rf_nodes = loaded.get("nodes", [])
-            st.session_state.rf_edges = loaded.get("edges", [])
-            st.success("Bowtie loaded from file.")
-            # No st.rerun() needed – Streamlit already reruns this script
-        except Exception as e:
-            st.error(f"Could not load JSON: {e}")
 
 st.markdown("---")
 
@@ -126,4 +91,47 @@ st.markdown(
     → that branch stays in the normal color (no breach).
 """
 )
+
 st.markdown("---")
+
+# ---------- Save / Load controls (now BELOW the canvas) ----------
+
+st.subheader("Save / Load bowtie")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    # Use the latest nodes/edges from session
+    payload = {
+        "nodes": st.session_state.rf_nodes,
+        "edges": st.session_state.rf_edges,
+    }
+    json_bytes = json.dumps(payload, indent=2).encode("utf-8")
+
+    # Build a data: URL so we don't use Streamlit's media storage
+    b64 = base64.b64encode(json_bytes).decode("utf-8")
+    href = (
+        f'<a href="data:application/json;base64,{b64}" '
+        f'download="bowtie_graph.json">💾 Download bowtie JSON</a>'
+    )
+    st.markdown(href, unsafe_allow_html=True)
+    st.caption("Download the current bowtie as JSON.")
+
+with col2:
+    uploaded = st.file_uploader(
+        "Upload bowtie JSON",
+        type=["json"],
+        help="Upload a previously saved bowtie_graph.json file.",
+        key="bowtie_json_upload",
+    )
+
+    if uploaded is not None:
+        try:
+            loaded = json.load(uploaded)
+            st.session_state.rf_nodes = loaded.get("nodes", [])
+            st.session_state.rf_edges = loaded.get("edges", [])
+            st.success("Bowtie loaded from file. The canvas will reflect the new graph on the next rerun.")
+            # Optional: force an immediate rerun so the canvas updates right away
+            st.rerun()
+        except Exception as e:
+            st.error(f"Could not load JSON: {e}")
