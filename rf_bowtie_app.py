@@ -23,7 +23,7 @@ if "rf_nodes" not in st.session_state:
     st.session_state.rf_nodes = [
         {
             "id": uid("center"),
-            "type": "default",
+            "type": "topEvent",
             "data": {
                 "label": "🎯 Top Event",
                 "baseLabel": "🎯 Top Event",

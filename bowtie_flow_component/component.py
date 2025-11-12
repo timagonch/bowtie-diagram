@@ -15,21 +15,12 @@ if _IS_DEV:
         url=dev_url,
     )
 else:
-    parent_dir = os.path.dirname(os.path.abspath(__file__))
-    dist_dir = os.path.join(parent_dir, "frontend", "dist")
-
-    st.write("bowtie_flow_component using frontend dir:", dist_dir)
-    st.write("dist exists:", os.path.isdir(dist_dir))
-    if os.path.isdir(dist_dir):
-        try:
-            st.write("dist contents:", os.listdir(dist_dir))
-        except Exception as e:
-            st.write("Could not list dist contents:", e)
-
+    frontend_dir = os.path.join(os.path.dirname(__file__), "frontend", "dist")
     _bowtie_flow_impl = components.declare_component(
-        "bowtie_flow",   # <-- SAME SIMPLE NAME
-        path=dist_dir,
+        "bowtie_flow",
+        path=frontend_dir,
     )
+
 
 
 def bowtie_flow(
