@@ -70,68 +70,31 @@ st.session_state.rf_nodes = new_nodes
 st.session_state.rf_edges = new_edges
 
 st.markdown(
-    """
-**Canvas controls**
+"""
+### Canvas controls
 
-- Right-click on empty canvas → create a node (Threat / Barrier / Consequence / Top Event)  
-- Right-click a node → collapse/expand branch (for threats), toggle barrier failed/active, delete node  
-- Right-click a connection → delete connection  
-- Drag from a node handle to another node → create an edge  
-- Drag nodes to reposition them  
+- **Right-click empty canvas** → add a node *(Threat / Barrier / Hazard / Consequence / Top Event)*  
+- **Right-click a node** → collapse/expand branch (threats), collapse/expand consequence branch, toggle barrier failed/active, show/hide barrier metadata, highlight/unhighlight branch, delete node, edit
+- **Right-click a connection (edge)** → highlight/unhighlight branch, **insert a barrier** at the midpoint, delete connection
+- **Double-click a node** → open edit panel *(barriers include type/medium/responsible/status)*
+- **Drag** nodes to reposition
+- **Connect** by dragging from one handle to another
 
-**Barrier failure logic**
+**Special logic & visuals**
+- **Hazard** nodes connect **from the bottom** into the **top** of the Top Event.
+- If a **Threat → Top Event** path has **no barriers** or **all barriers are failed**, that branch **breaches**:
+  - All edges on that path turn **bright red** and animate.
+  - The **Top Event pulses red** (soft ring animation).
+  - Hazards feeding a breached Top Event render with **red-tinted hazard stripes**.
+- If the Top Event is breached, edges from **Top Event → Consequences** turn red until a **mitigative barrier** is encountered.  
+  - If that mitigative barrier **failed**, red continues to the consequence (consequence turns red).
+- **Branch highlight** dims all other branches to ~25% opacity and slightly desaturates them.
+- **Threat collapse** hides nodes **between the Threat and the Top Event** on that path and adds a temporary shortcut edge (stays red if the branch is breached).
+- **Consequence collapse** hides mitigative barriers between **Top Event → that consequence** and adds a temporary shortcut.
 
-- Barriers can be set to **failed** either via:
-  - Right-click on a barrier → **Mark barrier as failed/active**, or  
-  - Double-click a barrier → change status in the edit panel  
-- For any branch from a **Threat** to the **Top Event**:
-  - If **all barriers on that branch are failed** (or there are no barriers),  
-    → all connections on that branch turn **bright red**, and the Top Event is highlighted red.  
-  - If **at least one barrier remains active** on the branch,  
-    → that branch stays in the normal color (no breach).
+**Saving / Loading**
+- Use the **Export JSON** / **Import JSON** buttons (top-left of the canvas toolbar).  
+  *(The old Save/Load panel has been removed.)*
 """
 )
 
-st.markdown("---")
-
-# ---------- Save / Load controls (now BELOW the canvas) ----------
-
-st.subheader("Save / Load bowtie")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    # Use the latest nodes/edges from session
-    payload = {
-        "nodes": st.session_state.rf_nodes,
-        "edges": st.session_state.rf_edges,
-    }
-    json_bytes = json.dumps(payload, indent=2).encode("utf-8")
-
-    # Build a data: URL so we don't use Streamlit's media storage
-    b64 = base64.b64encode(json_bytes).decode("utf-8")
-    href = (
-        f'<a href="data:application/json;base64,{b64}" '
-        f'download="bowtie_graph.json">💾 Download bowtie JSON</a>'
-    )
-    st.markdown(href, unsafe_allow_html=True)
-    st.caption("Download the current bowtie as JSON.")
-
-with col2:
-    uploaded = st.file_uploader(
-        "Upload bowtie JSON",
-        type=["json"],
-        help="Upload a previously saved bowtie_graph.json file.",
-        key="bowtie_json_upload",
-    )
-
-    if uploaded is not None:
-        try:
-            loaded = json.load(uploaded)
-            st.session_state.rf_nodes = loaded.get("nodes", [])
-            st.session_state.rf_edges = loaded.get("edges", [])
-            st.success("Bowtie loaded from file. The canvas will reflect the new graph on the next rerun.")
-            # Optional: force an immediate rerun so the canvas updates right away
-            st.rerun()
-        except Exception as e:
-            st.error(f"Could not load JSON: {e}")

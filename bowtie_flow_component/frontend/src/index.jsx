@@ -1,5 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { toPng } from "html-to-image";
+
 
 import ReactFlow, {
   Background,
@@ -18,6 +20,9 @@ import {
   StreamlitComponentBase,
   withStreamlitConnection,
 } from "streamlit-component-lib";
+
+const DEFAULT_EDGE_STROKE = "#94a3b8"; // slate-300
+const DEFAULT_EDGE_WIDTH  = 2;
 
 /**
  * ---------- Pulsing CSS for breached Top Event ----------
@@ -249,48 +254,38 @@ function collectBranch(startId, nodes, edges) {
  * Collapse consequence branches: hide all nodes & edges downstream of certain consequences.
  */
 function applyConsequenceCollapse(nodesIn, edgesIn, collapsedConseqIds) {
+  // clone shallowly, but DO NOT reset 'hidden'
   const nodes = (nodesIn || []).map((n) => ({ ...n }));
-  const rawEdges = (edgesIn || []).map((e) => ({ ...e }));
+  let viewEdges = (edgesIn || []).map((e) => ({ ...e }));
 
-  // Reset hidden flags each time
-  nodes.forEach((n) => {
-    n.hidden = false;
-  });
-
+  // Nothing to collapse on the consequence side → return as-is (preserving prior hidden flags)
   if (!collapsedConseqIds || collapsedConseqIds.length === 0) {
-    return { nodes, edges: rawEdges };
+    return { nodes, edges: viewEdges };
   }
 
   const nodesById = {};
-  nodes.forEach((n) => {
-    nodesById[n.id] = n;
-  });
+  nodes.forEach((n) => { nodesById[n.id] = n; });
 
   // Build adjacency (source -> outgoing edges)
   const outEdges = {};
-  nodes.forEach((n) => {
-    outEdges[n.id] = [];
-  });
-  rawEdges.forEach((e) => {
+  nodes.forEach((n) => { outEdges[n.id] = []; });
+  viewEdges.forEach((e) => {
     if (outEdges[e.source]) outEdges[e.source].push(e);
   });
 
-  // Find Top Event / center node
+  // Find Top Event (center) node
   const centerCandidates = nodes.filter(
     (n) => typeof n.id === "string" && n.id.startsWith("center_")
   );
-  const centerId =
-    centerCandidates.length > 0
-      ? centerCandidates[centerCandidates.length - 1].id
-      : null;
+  const centerId = centerCandidates.length
+    ? centerCandidates[centerCandidates.length - 1].id
+    : null;
 
-  const existingConseqs = (collapsedConseqIds || []).filter(
-    (cid) => !!nodesById[cid]
-  );
+  const existingConseqs = (collapsedConseqIds || []).filter((cid) => !!nodesById[cid]);
   const collapsedSet = new Set(existingConseqs);
 
-  const hiddenNodeIds = new Set();
-  let viewEdges = [...rawEdges];
+  // Keep track of nodes hidden in THIS pass, but also respect nodes already hidden
+  const hiddenNodeIds = new Set(nodes.filter((n) => n.hidden).map((n) => n.id));
 
   collapsedSet.forEach((conseqId) => {
     if (!centerId) return;
@@ -300,8 +295,7 @@ function applyConsequenceCollapse(nodesIn, edgesIn, collapsedConseqIds) {
     const localBarriers = new Set();
     let reachesConsequence = false;
 
-    // Walk **from center outwards** toward this consequence,
-    // collecting barrier nodes that sit on that path.
+    // Walk from center → consequence, collecting mitigative barriers on that path
     while (stack.length > 0) {
       const cur = stack.pop();
       if (visited.has(cur)) continue;
@@ -322,10 +316,10 @@ function applyConsequenceCollapse(nodesIn, edgesIn, collapsedConseqIds) {
       });
     }
 
-    // Hide those barriers on the view side
+    // Hide those barriers (preserving any prior hidden)
     localBarriers.forEach((bid) => hiddenNodeIds.add(bid));
 
-    // Add a synthetic shortcut edge center → consequence
+    // Add a synthetic shortcut center → consequence to show collapsed path
     if (reachesConsequence) {
       const alreadyHas = viewEdges.some(
         (e) =>
@@ -336,46 +330,39 @@ function applyConsequenceCollapse(nodesIn, edgesIn, collapsedConseqIds) {
       );
       if (!alreadyHas) {
         const conseqNode = nodesById[conseqId];
-        const cMeta =
-          conseqNode && conseqNode.data ? conseqNode.data.meta || {} : {};
+        const cMeta = (conseqNode?.data?.meta) || {};
         const breached = !!cMeta.breached;
 
         const collapseEdge = {
           id: `collapse_${centerId}_${conseqId}`,
           source: centerId,
           target: conseqId,
-          // always use the right-side handle on Top Event
           sourceHandle: "right_out",
           type: "default",
           data: { syntheticCollapse: true },
         };
-
         if (breached) {
-          collapseEdge.style = {
-            stroke: "#f97373",
-            strokeWidth: 3,
-          };
+          collapseEdge.style = { stroke: "#f97373", strokeWidth: 3 };
           collapseEdge.animated = true;
         }
-
         viewEdges.push(collapseEdge);
       }
     }
   });
 
-  // Apply hidden flags & filter edges that touch hidden nodes
+  // Apply hidden flags, preserving previous hides
   nodes.forEach((n) => {
-    if (hiddenNodeIds.has(n.id)) {
-      n.hidden = true;
-    }
+    if (hiddenNodeIds.has(n.id)) n.hidden = true;
   });
 
+  // Filter edges if they touch ANY hidden node (previous or new)
   viewEdges = viewEdges.filter(
     (e) => !hiddenNodeIds.has(e.source) && !hiddenNodeIds.has(e.target)
   );
 
   return { nodes, edges: viewEdges };
 }
+
 
 
 /**
@@ -398,7 +385,7 @@ function computeFailureHighlights(nodesIn, edgesIn) {
       meta: { ...((n.data || {}).meta || {}) },
     },
     style: { ...(n.style || {}) },
-    className: n.className || "",
+    // NOTE: no className manipulation anymore
   }));
 
   const edges = (edgesIn || []).map((e) => ({
@@ -564,15 +551,13 @@ function computeFailureHighlights(nodesIn, edgesIn) {
         hotEdgeIds.add(e.id);
 
         if (kind === "barrier" && barrierType === "mitigative") {
-          // Threat reaches mitigative barrier; edge to barrier is hot.
-          // If barrier failed, continue past it; if active, stop here.
+          // If mitigative barrier failed → continue; if active → stop here.
           if (meta.failed) {
             dfsFromCenter(nextId, nextVisited);
           }
         } else if (kind === "consequence") {
-          // Threat reaches consequence node → edge + consequence go red
+          // Threat reaches consequence node
           hotConsequenceIds.add(nextId);
-          // Usually a sink; we can stop here.
         } else {
           // Other nodes – propagate further
           dfsFromCenter(nextId, nextVisited);
@@ -636,51 +621,51 @@ function computeFailureHighlights(nodesIn, edgesIn) {
 
   // ---------- 4) Final styling for hazards, barriers, threats, center, consequences ----------
   nodes.forEach((n) => {
-  const meta = n.data.meta || {};
-  const kind = meta.kind || "";
-  const baseStyle = n.style || {};
+    const meta = n.data.meta || {};
+    const kind = meta.kind || "";
+    const baseStyle = n.style || {};
 
-  if (kind === "hazard") {
-    const baseText = n.data.baseLabel || n.data.label || "";
+    if (kind === "hazard") {
+      const baseText = n.data.baseLabel || n.data.label || "";
 
-    if (meta.breached) {
-      // Hazard associated with a breached Top Event – red-tinted stripes
-      n.style = {
-        ...baseStyle,
-        background:
-          "repeating-linear-gradient(45deg, #fecaca, #fecaca 8px, #7f1d1d 8px, #7f1d1d 16px)",
-        border: "2px solid #b91c1c",
-        color: "#7f1d1d",
-        fontWeight: 700,
-        textShadow:
-          "0 0 2px rgba(255,255,255,1), \
-          0 0 4px rgba(255,255,255,1), \
-          0 0 8px rgba(255,255,255,1), \
-          0 0 12px rgba(255,255,255,0.9)",
+      if (meta.breached) {
+        // Hazard associated with a breached Top Event – red-tinted stripes
+        n.style = {
+          ...baseStyle,
+          background:
+            "repeating-linear-gradient(45deg, #fecaca, #fecaca 8px, #7f1d1d 8px, #7f1d1d 16px)",
+          border: "2px solid #b91c1c",
+          color: "#7f1d1d",
+          fontWeight: 700,
+          textShadow:
+            "0 0 2px rgba(255,255,255,1), \
+            0 0 4px rgba(255,255,255,1), \
+            0 0 8px rgba(255,255,255,1), \
+            0 0 12px rgba(255,255,255,0.9)",
+        };
+      } else {
+        // Normal hazard: yellow/black hazard stripes
+        n.style = {
+          ...baseStyle,
+          background:
+            "repeating-linear-gradient(45deg, #facc15, #facc15 8px, #000 8px, #000 16px)",
+          border: "2px solid #000",
+          color: "#000",
+          fontWeight: 700,
+          textShadow:
+            "0 0 2px rgba(255,255,255,1), \
+            0 0 4px rgba(255,255,255,1), \
+            0 0 8px rgba(255,255,255,1), \
+            0 0 12px rgba(255,255,255,0.9)",
+        };
+      }
+
+      // keep the label as plain text so it can be serialized
+      n.data = {
+        ...(n.data || {}),
+        label: baseText,
       };
-    } else {
-      // Normal hazard: yellow/black hazard stripes
-      n.style = {
-        ...baseStyle,
-        background:
-          "repeating-linear-gradient(45deg, #facc15, #facc15 8px, #000 8px, #000 16px)",
-        border: "2px solid #000",
-        color: "#000",
-        fontWeight: 700,
-        textShadow:
-          "0 0 2px rgba(255,255,255,1), \
-          0 0 4px rgba(255,255,255,1), \
-          0 0 8px rgba(255,255,255,1), \
-          0 0 12px rgba(255,255,255,0.9)",
-      };
-    }
-
-    // keep the label as plain text so it can be serialized
-    n.data = {
-      ...(n.data || {}),
-      label: baseText,
-    };
-      } else if (kind === "barrier") {
+    } else if (kind === "barrier") {
       const type = meta.barrierType || "preventive";
 
       // Common style so \n in the label become real line breaks
@@ -720,29 +705,24 @@ function computeFailureHighlights(nodesIn, edgesIn) {
       }
     } else if (kind === "center") {
       if (meta.breached) {
-        // Breached Top Event: red + pulsating
+        // Breached Top Event: red + pulsating (inline animation)
         n.style = {
           ...baseStyle,
           background: "#fecaca",
           border: "2px solid #b91c1c",
           color: "#111827",
+          animation: "bowtie-pulse-red 1.6s infinite",
         };
-        n.className = `${n.className || ""} rf-top-pulse`.trim();
       } else {
-        // Safe Top Event: green
+        // Safe Top Event: green (ensure we clear any lingering animation)
+        const cleaned = { ...baseStyle };
+        delete cleaned.animation;
         n.style = {
-          ...baseStyle,
+          ...cleaned,
           background: "#dcfce7",
           border: "2px solid #16a34a",
           color: "#064e3b",
         };
-        // remove pulse class if it was there
-        if (n.className) {
-          n.className = n.className
-            .split(" ")
-            .filter((c) => c !== "rf-top-pulse")
-            .join(" ");
-        }
       }
     } else if (kind === "threat") {
       if (meta.breached) {
@@ -783,34 +763,30 @@ function computeFailureHighlights(nodesIn, edgesIn) {
     }
   });
 
-    // ---------- 5) Branch highlighting via spotlight effect ----------
+  // ---------- 5) Branch highlighting via spotlight effect ----------
   const anyNodeHighlighted = nodes.some(
     (n) => n.data && n.data.meta && n.data.meta.highlighted
   );
-  const anyEdgeHighlighted = edges.some(
-    (e) => e.data && e.data.highlighted
-  );
+  const anyEdgeHighlighted = edges.some((e) => e.data && e.data.highlighted);
   const hasHighlight = anyNodeHighlighted || anyEdgeHighlighted;
 
-  // Nodes: strongly spotlight highlighted, strongly dim everything else
+  // Nodes: spotlight highlighted, dim everything else
   nodes.forEach((n) => {
     const meta = (n.data && n.data.meta) || {};
     const s = { ...(n.style || {}) };
 
-    // clear any old outline / filter so we don’t stack effects
+    // clear outline/filter so we don’t stack effects
     delete s.outline;
     delete s.outlineOffset;
     delete s.filter;
 
     if (hasHighlight) {
       if (meta.highlighted) {
-        // 🔵 bright outline around highlighted branch
         s.opacity = 1;
         s.outline = "2px solid rgba(59, 130, 246, 0.95)";
         s.outlineOffset = 2;
       } else {
-        // everything else heavily faded + desaturated
-        s.opacity = 0.15;
+        s.opacity = 0.25;
         s.filter = "grayscale(80%)";
       }
     } else {
@@ -820,7 +796,7 @@ function computeFailureHighlights(nodesIn, edgesIn) {
     n.style = s;
   });
 
-  // Edges: same idea – bright & thick for highlighted, faint for others
+  // Edges: bright for highlighted, faint for others
   edges.forEach((e) => {
     const highlighted = e.data && e.data.highlighted;
     const s = { ...(e.style || {}) };
@@ -830,7 +806,7 @@ function computeFailureHighlights(nodesIn, edgesIn) {
         s.opacity = 1;
         s.strokeWidth = (s.strokeWidth || 2) + 1;
       } else {
-        s.opacity = 0.15;
+        s.opacity = 0.25;
       }
     } else {
       s.opacity = 1;
@@ -840,9 +816,9 @@ function computeFailureHighlights(nodesIn, edgesIn) {
     // don't change e.animated here – breach logic already set it if needed
   });
 
-
   return { nodes, edges };
 }
+
 
 /**
  * Collapse engine: hide all downstream barriers and add synthetic Threat → Top Event edges.
@@ -850,121 +826,130 @@ function computeFailureHighlights(nodesIn, edgesIn) {
  */
 function applyCollapse(nodesIn, edgesIn, collapsedThreatIds) {
   const nodes = (nodesIn || []).map((n) => ({ ...n }));
-  const rawEdges = (edgesIn || []).map((e) => ({ ...e }));
+  let   viewEdges = (edgesIn || []).map((e) => ({ ...e }));
 
-  nodes.forEach((n) => {
-    n.hidden = false;
-  });
-
+  // Nothing to collapse on threat side → return as-is
   if (!collapsedThreatIds || collapsedThreatIds.length === 0) {
-    return { nodes, edges: rawEdges };
+    return { nodes, edges: viewEdges };
   }
 
+  // Index nodes & get meta.kind reliably
   const nodesById = {};
-  nodes.forEach((n) => {
-    nodesById[n.id] = n;
-  });
+  nodes.forEach((n) => { nodesById[n.id] = n; });
 
-  const outEdges = {};
-  nodes.forEach((n) => {
-    outEdges[n.id] = [];
-  });
-  rawEdges.forEach((e) => {
-    if (outEdges[e.source]) outEdges[e.source].push(e);
-  });
-
+  // Find latest center
   const centerCandidates = nodes.filter(
     (n) => typeof n.id === "string" && n.id.startsWith("center_")
   );
-  const centerId =
-    centerCandidates.length > 0
-      ? centerCandidates[centerCandidates.length - 1].id
-      : null;
+  const centerId = centerCandidates.length
+    ? centerCandidates[centerCandidates.length - 1].id
+    : null;
 
-  const existingThreats = (collapsedThreatIds || []).filter(
-    (tid) => !!nodesById[tid]
-  );
-  const collapsedSet = new Set(existingThreats);
+  if (!centerId) {
+    // No Top Event found → nothing to do
+    return { nodes, edges: viewEdges };
+  }
 
-  const hiddenNodeIds = new Set();
-  let viewEdges = [...rawEdges];
+  // Build directed adjacency: forward (src→tgt) and reverse (tgt→src)
+  const fwd = {};
+  const rev = {};
+  nodes.forEach((n) => { fwd[n.id] = []; rev[n.id] = []; });
+  viewEdges.forEach((e) => {
+    if (fwd[e.source]) fwd[e.source].push(e.target);
+    if (rev[e.target]) rev[e.target].push(e.source);
+  });
 
-  collapsedSet.forEach((threatId) => {
+  // Utility BFS that returns a Set of visited ids
+  function bfs(startIds, graph) {
     const visited = new Set();
-    const stack = [threatId];
-    const localBarriers = new Set();
-    let reachesCenter = false;
-
-    while (stack.length > 0) {
-      const cur = stack.pop();
-      if (visited.has(cur)) continue;
-      visited.add(cur);
-
-      (outEdges[cur] || []).forEach((e) => {
-        const tgt = e.target;
-        if (typeof tgt !== "string") return;
-
-        if (tgt.startsWith("barrier_")) {
-          localBarriers.add(tgt);
-          stack.push(tgt);
-        } else if (tgt.startsWith("center_")) {
-          reachesCenter = true;
-        } else {
-          stack.push(tgt);
+    const q = Array.isArray(startIds) ? [...startIds] : [startIds];
+    q.forEach((s) => visited.add(s));
+    while (q.length) {
+      const cur = q.shift();
+      const nbrs = graph[cur] || [];
+      for (const nxt of nbrs) {
+        if (!visited.has(nxt)) {
+          visited.add(nxt);
+          q.push(nxt);
         }
-      });
-    }
-
-    localBarriers.forEach((bid) => hiddenNodeIds.add(bid));
-
-    if (centerId && reachesCenter) {
-      const alreadyHas = viewEdges.some(
-        (e) =>
-          e.source === threatId &&
-          e.target === centerId &&
-          e.data &&
-          e.data.syntheticCollapse
-      );
-      if (!alreadyHas) {
-        const threatNode = nodesById[threatId];
-        const tMeta =
-          threatNode && threatNode.data ? threatNode.data.meta || {} : {};
-        const breached = !!tMeta.breached;
-
-        const collapseEdge = {
-          id: `collapse_${threatId}_${centerId}`,
-          source: threatId,
-          target: centerId,
-          targetHandle: "left_in", 
-          type: "default",
-          data: { syntheticCollapse: true },
-        };
-
-        if (breached) {
-          collapseEdge.style = {
-            stroke: "#f97373",
-            strokeWidth: 3,
-          };
-          collapseEdge.animated = true;
-        }
-
-        viewEdges.push(collapseEdge);
       }
     }
-  });
+    return visited;
+  }
 
-  nodes.forEach((n) => {
-    if (hiddenNodeIds.has(n.id)) {
-      n.hidden = true;
+  // Start with any nodes already hidden (from consequence collapse etc.)
+  const hiddenNodeIds = new Set(nodes.filter((n) => n.hidden).map((n) => n.id));
+
+  // We’ll also add synthetic “shortcut” edges Threat → Center for collapsed paths
+  const needSyntheticPairs = [];
+
+  // For each requested threat collapse, compute intersection to scope hiding
+  const existingThreats = (collapsedThreatIds || []).filter((tid) => !!nodesById[tid]);
+  for (const threatId of existingThreats) {
+    // 1) All nodes reachable forward from this threat
+    const reachFromThreat = bfs(threatId, fwd);
+
+    // 2) All nodes that can reach the center (reverse graph)
+    const canReachCenter = bfs(centerId, rev);
+
+    // 3) Intersection = on some path threat → … → center
+    const onPath = new Set(
+      [...reachFromThreat].filter((id) => canReachCenter.has(id))
+    );
+
+    // If the center isn’t in the forward reach, there is no path → skip
+    if (!onPath.has(centerId)) continue;
+
+    // Hide nodes “between” the threat and the center (keep endpoints visible)
+    for (const nid of onPath) {
+      if (nid === threatId || nid === centerId) continue;
+
+      // If you truly only want to hide barriers, keep this guard:
+      // const meta = nodesById[nid]?.data?.meta || {};
+      // if (meta.kind !== "barrier") continue;
+
+      hiddenNodeIds.add(nid);
     }
-  });
 
+    // Add a synthetic shortcut Threat → Center (for collapsed view)
+    needSyntheticPairs.push([threatId, centerId]);
+  }
+
+  // Apply hidden flags
+  nodes.forEach((n) => { if (hiddenNodeIds.has(n.id)) n.hidden = true; });
+
+  // Drop any edges that touch hidden nodes
   viewEdges = viewEdges.filter(
     (e) => !hiddenNodeIds.has(e.source) && !hiddenNodeIds.has(e.target)
   );
 
+  // Add synthetic edges (avoid duplicates)
+  for (const [tId, cId] of needSyntheticPairs) {
+    const already = viewEdges.some(
+      (e) => e.source === tId && e.target === cId && e.data && e.data.syntheticCollapse
+    );
+    if (!already) {
+      const breached = !!(nodesById[tId]?.data?.meta?.breached);
+      const syn = {
+        id: `collapse_${tId}_${cId}`,
+        source: tId,
+        target: cId,
+        targetHandle: "left_in",
+        type: "default",
+        data: { syntheticCollapse: true },
+      };
+      if (breached) {
+        syn.style = { stroke: "#f97373", strokeWidth: 3 };
+        syn.animated = true;
+      }
+      viewEdges.push(syn);
+    }
+  }
+
   return { nodes, edges: viewEdges };
 }
+
+
 
 const TopEventNode = ({ data, selected, style }) => {
   const label = data?.label || "🎯 Top Event";
@@ -1050,6 +1035,19 @@ const HazardNode = ({ data, selected, style }) => {
   );
 };
 
+/**
+ * Ensure all edges have a baseline inline stroke/width
+ * so html-to-image can rasterize them reliably.
+ */
+function ensureEdgeBaseline(viewEdges) {
+  return (viewEdges || []).map((e) => {
+    const s = { ...(e.style || {}) };
+    if (!s.stroke) s.stroke = DEFAULT_EDGE_STROKE;
+    if (!s.strokeWidth) s.strokeWidth = DEFAULT_EDGE_WIDTH;
+    return { ...e, style: s };
+  });
+}
+
 
 
 /**
@@ -1061,6 +1059,13 @@ class BowtieFlowComponent extends StreamlitComponentBase {
     super(props);
 
     this.state = {
+      ...this.state,
+      showGrid: true,          // show/hide the dots/lines
+      bgVariant: "dots",       // "dots" | "lines" | "cross"
+      bgColor: "#0b1220",      // canvas fill color
+      gridColor: "#334155",    // dots/lines color
+      gridGap: 20,             // spacing between dots/lines
+      gridSize: 1,  
       nodes: [],
       edges: [], // view edges for ReactFlow
       rawEdges: [], // canonical edges (structure)
@@ -1117,7 +1122,12 @@ class BowtieFlowComponent extends StreamlitComponentBase {
       // tracks when we're inserting a barrier into an existing edge
       pendingInsertFromEdge: null,
     };
-
+    this.handleToggleGrid = this.handleToggleGrid.bind(this);
+    this.handleBgColorChange = this.handleBgColorChange.bind(this);
+    this.handleGridColorChange = this.handleGridColorChange.bind(this);
+    this.handleVariantChange = this.handleVariantChange.bind(this);
+    this.handleGridGapChange = this.handleGridGapChange.bind(this);
+    this.handleGridSizeChange = this.handleGridSizeChange.bind(this);
     this.syncFromProps = this.syncFromProps.bind(this);
     this.pushToStreamlit = this.pushToStreamlit.bind(this);
     this.onNodesChange = this.onNodesChange.bind(this);
@@ -1146,6 +1156,15 @@ class BowtieFlowComponent extends StreamlitComponentBase {
     this.handleEdgeInsertNode = this.handleEdgeInsertNode.bind(this);
 
     this.toggleBranchHighlight = this.toggleBranchHighlight.bind(this);
+    this.fileInputRef = React.createRef();
+
+    this.handleExport = this.handleExport.bind(this);
+    this.handleImportClick = this.handleImportClick.bind(this);
+    this.handleImportFileChange = this.handleImportFileChange.bind(this);
+    this.cleanForSave = this.cleanForSave.bind(this);
+    this.handleSavePng = this.handleSavePng.bind(this);
+    this.canvasRef = React.createRef();
+
   }
 
   componentDidMount() {
@@ -1177,7 +1196,9 @@ class BowtieFlowComponent extends StreamlitComponentBase {
       collapsedConsequences
     );
 
-    return { nodes: afterConseqCollapse.nodes, edges: afterConseqCollapse.edges };
+    const finalizedEdges = ensureEdgeBaseline(afterConseqCollapse.edges);
+
+    return { nodes: afterConseqCollapse.nodes, edges: finalizedEdges };
   }
 
   syncFromProps() {
@@ -1270,6 +1291,42 @@ class BowtieFlowComponent extends StreamlitComponentBase {
       }
     });
   }
+
+  cleanForSave(nodes, rawEdges) {
+  // Only persist what's needed to rebuild: id, position, type, data (with meta/baseLabel)
+  const saveNodes = (nodes || []).map((n) => ({
+    id: n.id,
+    position: n.position,
+    type: n.type, // e.g., 'topEvent', 'hazard', or undefined for default
+    data: {
+      // Keep baseLabel + meta (includes barrier fields, highlighted flags, etc.)
+      baseLabel: n.data?.baseLabel ?? n.data?.label ?? "",
+      meta: n.data?.meta ?? {},
+      // Keep current visible label for convenience (not strictly necessary)
+      label: n.data?.baseLabel ?? n.data?.label ?? "",
+    },
+  }));
+
+  // rawEdges is your canonical structure (no synthetic collapse edges)
+  const saveEdges = (rawEdges || []).map((e) => ({
+    id: e.id,
+    source: e.source,
+    target: e.target,
+    sourceHandle: e.sourceHandle,
+    targetHandle: e.targetHandle,
+    type: e.type || "default",
+    data: e.data && Object.keys(e.data).length ? e.data : undefined,
+  }));
+
+  return {
+    $schema: "https://todus-advisors.github/bowtie/v1",
+    version: 1,
+    saved_at: new Date().toISOString(),
+    nodes: saveNodes,
+    edges: saveEdges,
+  };
+}
+
 
   // ---------- Pane context menu ----------
 
@@ -2814,74 +2871,446 @@ class BowtieFlowComponent extends StreamlitComponentBase {
   // ---------- Render ----------
 
   render() {
-    const { nodes, edges } = this.state;
-    const height = this.props.args.height || 700;
+  const { nodes, edges } = this.state;
+  const height = this.props.args.height || 1000;
 
-    const nodeTypes = {
-      topEvent: TopEventNode,
-      hazard: HazardNode,
-    };
+  const nodeTypes = {
+    topEvent: TopEventNode,
+    hazard: HazardNode,
+  };
 
-    return (
+  return (
+    <div
+      ref={this.canvasRef} 
+      style={{
+        width: "100%",
+        height: `${height}px`,
+        position: "relative",
+        background: this.state.bgColor,
+      }}
+    >
+      {/* Export / Import toolbar */}
       <div
+        data-bowtie-overlay="1"
         style={{
-          width: "100%",
-          height: `${height}px`,
-          position: "relative",
+          position: "absolute",
+          top: 8,
+          left: 8,
+          zIndex: 30,
+          display: "flex",
+          gap: 8,
+          background: "rgba(2,6,23,0.9)",
+          border: "1px solid rgba(148,163,184,0.4)",
+          borderRadius: 8,
+          padding: "6px 8px",
+          boxShadow: "0 6px 18px rgba(0,0,0,0.6)",
         }}
       >
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          nodeTypes={nodeTypes}
-          onNodesChange={this.onNodesChange}
-          onEdgesChange={this.onEdgesChange}
-          onConnect={this.onConnect}
-          onInit={this.onInit}
-          fitView
-          fitViewOptions={{ padding: 0.2 }}
-          panOnScroll
-          zoomOnScroll
-          zoomOnPinch
-          onPaneContextMenu={this.onPaneContextMenu}
-          onPaneClick={this.onPaneClick}
-          onNodeDoubleClick={this.onNodeDoubleClick}
-          onNodeContextMenu={this.onNodeContextMenu}
-          onEdgeContextMenu={this.onEdgeContextMenu}
+        <button
+          onClick={this.handleExport}
+          style={{
+            padding: "4px 8px",
+            fontSize: "0.82rem",
+            background: "#10b981",
+            color: "white",
+            border: "none",
+            borderRadius: 6,
+            cursor: "pointer",
+          }}
         >
-          <Background />
+          Export JSON
+        </button>
 
-          <MiniMap
-            pannable
-            zoomable
-            style={{
-              background: "#020617",
-              borderRadius: 8,
-              boxShadow: "0 6px 18px rgba(0,0,0,0.6)",
-            }}
-          />
+        <button
+          onClick={this.handleImportClick}
+          style={{
+            padding: "4px 8px",
+            fontSize: "0.82rem",
+            background: "#3b82f6",
+            color: "white",
+            border: "none",
+            borderRadius: 6,
+            cursor: "pointer",
+          }}
+        >
+          Import JSON
+        </button>
 
-          <Controls
-            position="top-right"
-            showZoom={true}
-            showFitView={true}
-            showInteractive={false}
-            style={{
-              backgroundColor: "#020617",
-              borderRadius: 8,
-              boxShadow: "0 6px 18px rgba(0,0,0,0.6)",
-              border: "1px solid rgba(148,163,184,0.5)",
-            }}
-          />
-        </ReactFlow>
+          <button
+          onClick={this.handleSavePng}
+          style={{
+            padding: "4px 8px",
+            fontSize: "0.82rem",
+            background: "#f59e0b",
+            color: "white",
+            border: "none",
+            borderRadius: 6,
+            cursor: "pointer",
+          }}
+        >
+          Save PNG
+        </button>
 
-        {this.renderContextMenu()}
-        {this.renderEditPanel()}
-        {this.renderNodeMenu()}
-        {this.renderEdgeMenu()}
+
+        {/* Hidden file input for imports */}
+        <input
+          ref={this.fileInputRef}
+          type="file"
+          accept="application/json,.json"
+          style={{ display: "none" }}
+          onChange={this.handleImportFileChange}
+        />
       </div>
-    );
+
+      {/* Grid/background controls overlay */}
+      <div
+        data-bowtie-overlay="1"
+        style={{
+          position: "absolute",
+          top: 52, // just below the export/import bar
+          left: 8,
+          zIndex: 30,
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          background: "rgba(2,6,23,0.9)",
+          border: "1px solid rgba(148,163,184,0.4)",
+          borderRadius: 8,
+          padding: "6px 8px",
+          boxShadow: "0 6px 18px rgba(0,0,0,0.6)",
+        }}
+      >
+        <button
+          onClick={this.handleToggleGrid}
+          style={{
+            padding: "4px 8px",
+            fontSize: "0.8rem",
+            background: "#475569",
+            color: "white",
+            border: "none",
+            borderRadius: 6,
+            cursor: "pointer",
+          }}
+          title="Show / hide grid"
+        >
+          {this.state.showGrid ? "Hide dots" : "Show dots"}
+        </button>
+
+        <label
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            fontSize: 12,
+            color: "#cbd5e1",
+          }}
+        >
+          Fill
+          <input
+            type="color"
+            value={this.state.bgColor}
+            onChange={this.handleBgColorChange}
+            style={{
+              width: 24,
+              height: 24,
+              border: "none",
+              background: "transparent",
+              padding: 0,
+            }}
+            title="Canvas background color"
+          />
+        </label>
+
+        <label
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            fontSize: 12,
+            color: "#cbd5e1",
+          }}
+        >
+          Grid
+          <input
+            type="color"
+            value={this.state.gridColor}
+            onChange={this.handleGridColorChange}
+            style={{
+              width: 24,
+              height: 24,
+              border: "none",
+              background: "transparent",
+              padding: 0,
+            }}
+            title="Dots/lines color"
+          />
+        </label>
+
+        <select
+          value={this.state.bgVariant}
+          onChange={this.handleVariantChange}
+          style={{
+            fontSize: 12,
+            padding: "4px 6px",
+            borderRadius: 6,
+            background: "#0b1220",
+            color: "#e5e7eb",
+            border: "1px solid rgba(148,163,184,0.4)",
+          }}
+          title="Grid type"
+        >
+          <option value="dots">Dots</option>
+          <option value="lines">Lines</option>
+          <option value="cross">Cross</option>
+        </select>
+
+        <input
+          type="number"
+          min="4"
+          max="80"
+          step="2"
+          value={this.state.gridGap}
+          onChange={this.handleGridGapChange}
+          style={{
+            width: 58,
+            fontSize: 12,
+            padding: "4px 6px",
+            borderRadius: 6,
+            background: "#0b1220",
+            color: "#e5e7eb",
+            border: "1px solid rgba(148,163,184,0.4)",
+          }}
+          title="Grid spacing"
+        />
+
+        <input
+          type="number"
+          min="1"
+          max="6"
+          step="1"
+          value={this.state.gridSize}
+          onChange={this.handleGridSizeChange}
+          style={{
+            width: 48,
+            fontSize: 12,
+            padding: "4px 6px",
+            borderRadius: 6,
+            background: "#0b1220",
+            color: "#e5e7eb",
+            border: "1px solid rgba(148,163,184,0.4)",
+          }}
+          title="Dot size / line width"
+        />
+      </div>
+
+      <ReactFlow
+        nodes={nodes}
+        edges={edges}
+        nodeTypes={nodeTypes}
+        onNodesChange={this.onNodesChange}
+        onEdgesChange={this.onEdgesChange}
+        onConnect={this.onConnect}
+        onInit={this.onInit}
+        fitView
+        fitViewOptions={{ padding: 0.2 }}
+        panOnScroll
+        zoomOnScroll
+        zoomOnPinch
+        onPaneContextMenu={this.onPaneContextMenu}
+        onPaneClick={this.onPaneClick}
+        onNodeDoubleClick={this.onNodeDoubleClick}
+        onNodeContextMenu={this.onNodeContextMenu}
+        onEdgeContextMenu={this.onEdgeContextMenu}
+      >
+        {this.state.showGrid && (
+          <Background
+            variant={this.state.bgVariant} // "dots" | "lines" | "cross"
+            gap={this.state.gridGap}
+            size={this.state.gridSize}
+            color={this.state.gridColor}
+          />
+        )}
+
+        <MiniMap
+          pannable
+          zoomable
+          style={{
+            background: "#020617",
+            borderRadius: 8,
+            boxShadow: "0 6px 18px rgba(0,0,0,0.6)",
+          }}
+        />
+
+        <Controls
+          position="top-right"
+          showZoom
+          showFitView
+          showInteractive={false}
+          style={{
+            backgroundColor: "#020617",
+            borderRadius: 8,
+            boxShadow: "0 6px 18px rgba(0,0,0,0.6)",
+            border: "1px solid rgba(148,163,184,0.5)",
+          }}
+        />
+      </ReactFlow>
+
+      {this.renderContextMenu()}
+      {this.renderEditPanel()}
+      {this.renderNodeMenu()}
+      {this.renderEdgeMenu()}
+    </div>
+  );
+}
+
+  handleExport() {
+  const payload = this.cleanForSave(this.state.nodes, this.state.rawEdges);
+  const json = JSON.stringify(payload, null, 2);
+
+  const blob = new Blob([json], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+
+  const ts = new Date();
+  const pad = (x) => String(x).padStart(2, "0");
+  const fname = `bowtie_diagram_${ts.getFullYear()}${pad(ts.getMonth()+1)}${pad(ts.getDate())}_${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}.json`;
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = fname;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+handleImportClick() {
+  if (this.fileInputRef?.current) {
+    this.fileInputRef.current.value = ""; // reset so same file can be chosen again
+    this.fileInputRef.current.click();
   }
+}
+
+handleImportFileChange(e) {
+  const file = e.target.files?.[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const parsed = JSON.parse(reader.result);
+
+      // Basic shape check
+      if (!Array.isArray(parsed?.nodes) || !Array.isArray(parsed?.edges)) {
+        console.error("Invalid file format.");
+        return;
+      }
+
+      // Ensure meta defaults; positions/types respected
+      const loadedNodes = parsed.nodes.map((n) => ({
+        id: n.id,
+        position: n.position || { x: 0, y: 0 },
+        type: n.type, // may be undefined (default node)
+        data: {
+          label: n.data?.baseLabel ?? n.data?.label ?? "",
+          baseLabel: n.data?.baseLabel ?? n.data?.label ?? "",
+          meta: { ...(n.data?.meta || {}) },
+        },
+      }));
+
+      const loadedEdges = parsed.edges.map((e) => ({
+        id: e.id,
+        source: e.source,
+        target: e.target,
+        sourceHandle: e.sourceHandle,
+        targetHandle: e.targetHandle,
+        type: e.type || "default",
+        data: e.data,
+      }));
+
+      // Recompute visuals & breach state from imported structure
+      const processed = this.recalcNodes(loadedNodes, loadedEdges, [], []);
+
+      this.setState(
+        (state) => ({
+          ...state,
+          nodes: processed.nodes,
+          edges: processed.edges,
+          rawEdges: loadedEdges,
+          collapsedThreats: [],
+          collapsedConsequences: [],
+        }),
+        this.pushToStreamlit
+      );
+    } catch (err) {
+      console.error("Failed to parse JSON:", err);
+    }
+  };
+  reader.readAsText(file);
+}
+
+handleToggleGrid() {
+  this.setState((s) => ({ showGrid: !s.showGrid }));
+}
+handleBgColorChange(e) {
+  this.setState({ bgColor: e.target.value });
+}
+handleGridColorChange(e) {
+  this.setState({ gridColor: e.target.value });
+}
+handleVariantChange(e) {
+  this.setState({ bgVariant: e.target.value });
+}
+handleGridGapChange(e) {
+  const v = Math.max(4, Math.min(80, Number(e.target.value) || 0));
+  this.setState({ gridGap: v });
+}
+handleGridSizeChange(e) {
+  const v = Math.max(1, Math.min(6, Number(e.target.value) || 0));
+  this.setState({ gridSize: v });
+}
+
+async handleSavePng() {
+  if (!this.canvasRef.current) return;
+
+  // filter out overlay UI (menus/toolbars) from the snapshot
+  const filter = (node) => {
+    if (!(node instanceof Element)) return true;
+    // exclude anything explicitly marked as overlay
+    if (node.closest('[data-bowtie-overlay="1"]')) return false;
+    // optional: exclude context menus by selector if you’d like
+    // if (node.closest('[data-bowtie-contextmenu="1"]')) return false;
+    return true;
+  };
+
+  try {
+    const dataUrl = await toPng(this.canvasRef.current, {
+      backgroundColor: this.state.bgColor, // keep current fill
+      pixelRatio: 2,                        // crisp export
+      cacheBust: true,
+      filter,
+    });
+
+    const ts = new Date();
+    const pad = (x) => String(x).padStart(2, "0");
+    const fname =
+      `bowtie_snapshot_` +
+      `${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(ts.getDate())}_` +
+      `${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}.png`;
+
+    const a = document.createElement("a");
+    a.href = dataUrl;
+    a.download = fname;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } catch (err) {
+    console.error("PNG export failed:", err);
+  }
+}
+
+
+
+
 }
 
 const Wrapped = withStreamlitConnection(BowtieFlowComponent);
