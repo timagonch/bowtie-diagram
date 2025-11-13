@@ -61,7 +61,7 @@ st.subheader("Canvas")
 new_nodes, new_edges = bowtie_flow(
     nodes=st.session_state.rf_nodes,
     edges=st.session_state.rf_edges,
-    height=800,
+    height=1000,
     key="bowtie_rf",
 )
 

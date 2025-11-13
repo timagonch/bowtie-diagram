@@ -1,18 +1,18 @@
 # 🧠 Bow-Tie Risk Visualizer (ReactFlow + Streamlit)
 
-An interactive **Bow-Tie Risk Diagram Builder** built with:
+An advanced **Bow-Tie Risk Diagram Builder** that supports hazards, threats, preventive & mitigative barriers, consequences, live breach propagation, branch collapsing, barrier metadata, spotlight highlighting, PNG export, and JSON save/load.
 
-- **Streamlit** (Python)
-- **ReactFlow** (React / JavaScript)
+Built with:
+
+- **ReactFlow** (visual graph engine)  
+- **Streamlit** (Python host app)  
 - A custom Streamlit component in `bowtie_flow_component/frontend`
-
-You can create, connect, collapse, and expand threats, barriers, and consequences — and save or reload bowties as JSON files.
 
 ---
 
 ## 🗂️ Project Structure
 
-```text
+```
 BOWTIE/
 │
 ├── bowtie_flow_component/
@@ -20,14 +20,13 @@ BOWTIE/
 │   ├── component.py
 │   └── frontend/
 │       ├── src/
-│       │   └── index.jsx
+│       │   └── index.jsx      ← Full Bowtie ReactFlow editor
 │       ├── index.html
 │       ├── package.json
-│       ├── package-lock.json
 │       ├── node_modules/
-│       └── .parcel-cache / dist
+│       └── dist/
 │
-├── rf_bowtie_app.py
+├── rf_bowtie_app.py         ← Streamlit app
 ├── pyproject.toml
 ├── uv.lock
 └── README.md
@@ -37,154 +36,206 @@ BOWTIE/
 
 ## ⚙️ Requirements
 
-You need both **Python** and **Node.js**.
+### Python  
+- Python **3.9+**  
+- [`uv`](https://github.com/astral-sh/uv)
 
-### Python
-
-- Python **3.9+**
-- [`uv`](https://github.com/astral-sh/uv) (Python dependency manager)
-
-### JavaScript
-
-- [Node.js](https://nodejs.org/) (LTS is fine)
-- `npm` (comes with Node)
+### JavaScript  
+- Node.js (LTS recommended)  
+- npm  
 
 ---
 
-## 🚀 Setup & Run
+## 🚀 Running the App
 
-You will run **two terminals**:
+You must run **two terminals**: React frontend + Streamlit backend.
 
-1. **Frontend (React)** — runs the visual editor
-2. **Backend (Streamlit)** — runs the Python app
+---
 
 ### 1️⃣ Clone the repo
 
 ```bash
-git clone https://github.com/<your-username>/<repo-name>.git
-cd <repo-name>
+git clone https://github.com/<your-username>/<repo>.git
+cd <repo>
 ```
 
-### 2️⃣ Python setup (with uv)
+---
 
-From the repo root:
+### 2️⃣ Install Python dependencies
 
 ```bash
 uv sync
 ```
 
-This creates `.venv` and installs all Python dependencies defined in `pyproject.toml` / `uv.lock`.
+Creates `.venv` and installs dependencies.
 
-### 3️⃣ Frontend setup (Node / npm)
+---
 
-From the repo root:
+### 3️⃣ Install frontend dependencies
 
 ```bash
 cd bowtie_flow_component/frontend
 npm install
 ```
 
-This installs the JS dependencies into `bowtie_flow_component/frontend/node_modules`.
+---
 
-### 4️⃣ Run both servers
+### 4️⃣ Start both servers
 
-Open **two terminals**.
-
-**Terminal 1 – Frontend dev server**
-
-From `bowtie_flow_component/frontend`:
+#### Terminal 1 — ReactFlow dev server
 
 ```bash
 npm run dev
 ```
 
-Leave this running. It serves the ReactFlow frontend (usually on `http://localhost:3000` or `3001`).
+Runs at `http://localhost:3000` (or next available port).
 
-**Terminal 2 – Streamlit app**
-
-From the repo root:
+#### Terminal 2 — Streamlit backend
 
 ```bash
-cd <repo-name>
 uv run streamlit run rf_bowtie_app.py
 ```
 
-Then open the URL printed in the terminal, typically:
+Opens:
 
-```text
+```
 http://localhost:8501
 ```
 
-Keep **both** terminals running while you use the app.
+> ⚠ **Keep both terminals running** while using the app.
 
 ---
 
-## 💾 Saving & Loading Bow-Tie Graphs
+## 🎨 Editor Features
 
-Inside the Streamlit app:
+### Node Types
+- **🎯 Top Event** (pulsates red when breached)
+- **⚠ Hazard** — connects from the **top** into the Top Event  
+- **⚠ Threat**
+- **🛡 Barrier** (preventive / mitigative)
+- **❗ Consequence**
 
-- **Save your diagram**
-  - Click **“💾 Download bowtie JSON”**
-  - This downloads a file like `bowtie_graph.json`
+---
 
-- **Load a saved diagram**
-  - Click **“Upload bowtie JSON”**
-  - Select a previously saved `bowtie_graph.json` file to reload that bowtie
+## ✏️ Node Editing (Double-Click)
 
-The JSON format is:
+All nodes support text editing.  
+Barriers additionally support:
 
-```json
-{
-  "nodes": [ ... ],
-  "edges": [ ... ]
-}
-```
+- Preventive / Mitigative  
+- Human / Hardware / Human–Hardware  
+- Responsible Party  
+- Failure State (Active / Failed)  
+- Auto-generated metadata block beneath the label  
+
+Hazards & Top Event support label-only editing.
+
+---
+
+## 🖱 Right-Click Menus
+
+### On empty canvas
+- Add Threat / Barrier / Hazard / Consequence / Top Event
+
+### On nodes
+- Edit node  
+- Collapse / Expand threat branch  
+- Collapse / Expand consequence branch  
+- Mark barrier as Active / Failed  
+- Hide / Show barrier metadata  
+- Highlight / Unhighlight branch (spotlight mode)  
+- Delete node  
+
+### On edges
+- Highlight / Unhighlight branch  
+- Insert barrier into that edge (auto-splitting)  
+- Delete connection  
+- Synthetic collapse edges cannot be deleted manually
+
+---
+
+## 🔥 Breach Detection Logic
+
+### Threat → Top Event
+A threat path is **breached** if:
+
+- All preventive barriers on that path are **failed**, or  
+- There are **no barriers**
+
+When breached:
+- Path edges turn **red & animated**
+- Threat becomes breached
+- Top Event pulses red and is marked breached
+
+### Top Event → Consequence
+If Top Event is breached:
+- Breach propagates **rightward**
+- Stops at **active mitigative barriers**
+- Continues through **failed mitigative barriers**
+- Consequences reached by a breach become breached
+
+### Hazard Behavior
+If Top Event is breached:
+- All hazards feeding it become breached  
+- Hazards always connect from **top → Top Event**
+
+---
+
+## 🔽 Branch Collapsing
+
+### Threat Collapsing
+- Hides all nodes **between Threat → Top Event**  
+- Adds synthetic short-cut edge Threat → Top Event  
+- Synthetic edge preserves breach coloring
+
+### Consequence Collapsing
+- Hides mitigative barriers **between Top Event → Consequence**  
+- Adds synthetic Top Event → Consequence shortcut  
+- Breach styling preserved
+
+Both collapse types are independent.
+
+---
+
+## 🔦 Branch Highlighting (Spotlight Mode)
+
+Highlighting a branch:
+- Selected path → full opacity and color  
+- Everything else becomes **50% transparent + grayscale**  
+- Toggle again to remove highlight
+
+---
+
+## 💾 Exporting & Importing
+
+### Export JSON
+- Reconstructable structure  
+- Preserves positions  
+- Includes barrier metadata  
+- Excludes synthetic collapse edges
+
+### Import JSON
+- Fully rehydrated  
+- Recalculates breach states  
+- Clears collapse state on load
+
+### Save PNG
+- High-resolution export  
+- Canvas only (menus & toolbars excluded)  
+- Uses your custom background color  
 
 ---
 
 ## 🧭 Canvas Controls
 
-**On the canvas:**
-
-- Right-click **empty space** → create a node  
-  (Threat / Barrier / Consequence / Top Event)
-- Right-click **a node** → node actions:  
-  - Collapse / expand branch (for a valid Threat → Barrier(s) → Top Event path)  
-  - Delete node (removes its connections)
-- Right-click **a connection (edge)** → delete that connection
-- Drag from a node **handle** → create a new connection to another node
-- Drag **nodes** → reposition them
-
-**Risk logic (calculated live in the frontend):**
-
-- **Threats**  
-  Base risk = `Severity × Likelihood`  
-  Preventive barriers reduce this via their effectiveness (%)
-
-- **Top Event**  
-  Current risk = sum of residual risks of all **connected** threats
-
-- **Consequences**  
-  Risk = (Top Event residual) × (Consequence Severity × Likelihood)  
-  Mitigative barriers reduce this via their effectiveness (%)
-
----
-
-## 🧰 Troubleshooting
-
-- **Blank canvas / component not loading**
-  - Check that `npm run dev` is still running and not showing errors.
-  - Make sure you’re on the correct URL (`http://localhost:8501`).
-
-- **Upload doesn’t change the diagram**
-  - Confirm the file is valid JSON and has both `"nodes"` and `"edges"` keys.
-  - Try refreshing the browser tab once.
-
-- **Python dependency issues**
-  - Run `uv sync` again from the repo root.
-
-- **Port already in use**
-  - Either Streamlit or the dev server port is taken. Stop the other process or run on a different port (e.g. `npm run dev -- --port 3005`).
+- Right-click empty space → create node  
+- Drag nodes to reposition  
+- Drag handles to connect nodes  
+- Right-click edges → manage connection  
+- Scroll / pinch / drag → navigate  
+- MiniMap & Controls included  
+- Optional background grid (dots / lines / cross)  
+- Adjustable background + grid colors  
 
 ---
 

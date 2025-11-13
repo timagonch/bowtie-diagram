@@ -953,9 +953,11 @@ function applyCollapse(nodesIn, edgesIn, collapsedThreatIds) {
 
 const TopEventNode = ({ data, selected, style }) => {
   const label = data?.label || "🎯 Top Event";
+  const breached = !!data?.meta?.breached;
 
   return (
     <div
+      className={breached ? "rf-top-pulse" : undefined}
       style={{
         ...style,
         padding: 10,
@@ -971,6 +973,7 @@ const TopEventNode = ({ data, selected, style }) => {
           : style?.boxShadow,
       }}
     >
+
       {/* Hazard input from above */}
       <Handle
         type="target"
