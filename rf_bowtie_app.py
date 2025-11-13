@@ -91,10 +91,6 @@ st.markdown(
 - **Branch highlight** dims all other branches to ~25% opacity and slightly desaturates them.
 - **Threat collapse** hides nodes **between the Threat and the Top Event** on that path and adds a temporary shortcut edge (stays red if the branch is breached).
 - **Consequence collapse** hides mitigative barriers between **Top Event → that consequence** and adds a temporary shortcut.
-
-**Saving / Loading**
-- Use the **Export JSON** / **Import JSON** buttons (top-left of the canvas toolbar).  
-  *(The old Save/Load panel has been removed.)*
 """
 )
 
