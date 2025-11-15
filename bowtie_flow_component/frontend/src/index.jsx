@@ -457,36 +457,75 @@ function computeFailureHighlights(nodesIn, edgesIn) {
   let centerIsHot = false;
 
   // ---------- 1) Threat → Top Event breach detection ----------
+    // ---------- 1) Threat → Top Event breach detection ----------
   function processThreat(threatId) {
-    let anyBreach = false;
+    // Track two kinds of “breach”:
+    // - anyCenterBreach: at least one path fully reaches Top Event with no active barriers
+    // - anyPartialBreach: path is blocked by an active barrier, but some edges up to that
+    //   barrier should still go red
+    let anyCenterBreach = false;
+    let anyPartialBreach = false;
 
-    function dfs(currentId, pathEdgeIds, barrierIds, visited) {
+    function dfs(currentId, pathEdgeIds, pathNodeIds, visited) {
+      // Reached Top Event (center) along some path from this threat
       if (currentId === centerId) {
-        // Evaluate this path: if no barriers OR all barriers failed → breach
-        let allFailed = true;
+        // pathNodeIds = [threat, ..., center]
+        // pathEdgeIds = edges between those nodes, in order
 
-        if (barrierIds.length > 0) {
-          for (const bId of barrierIds) {
-            const bNode = nodesById[bId];
-            const bMeta = (bNode && bNode.data && bNode.data.meta) || {};
-            if (!bMeta.failed) {
-              allFailed = false;
-              break;
-            }
+        // Collect barrier nodes in order along the path
+        const barrierSeq = [];
+        for (let i = 0; i < pathNodeIds.length; i++) {
+          const nid = pathNodeIds[i];
+          if (typeof nid === "string" && nid.startsWith("barrier_")) {
+            barrierSeq.push({ id: nid, idx: i });
           }
-        } else {
-          // No barriers at all – treat as unprotected path
-          allFailed = true;
         }
 
-        if (allFailed) {
-          anyBreach = true;
+        // No barriers at all → full breach (same as before)
+        if (barrierSeq.length === 0) {
           pathEdgeIds.forEach((eid) => hotEdgeIds.add(eid));
           centerIsHot = true;
+          anyCenterBreach = true;
+          return;
         }
+
+        // There is at least one barrier: find the FIRST active barrier
+        let firstActiveIdx = -1;
+        for (const { id, idx } of barrierSeq) {
+          const bNode = nodesById[id];
+          const bMeta = (bNode && bNode.data && bNode.data.meta) || {};
+          if (!bMeta.failed) {
+            firstActiveIdx = idx;
+            break;
+          }
+        }
+
+        if (firstActiveIdx === -1) {
+          // All barriers on this path are failed → full breach to Top Event
+          pathEdgeIds.forEach((eid) => hotEdgeIds.add(eid));
+          centerIsHot = true;
+          anyCenterBreach = true;
+        } else {
+          // At least one barrier is ACTIVE.
+          // We still want red from the threat up TO that first active barrier.
+          //
+          // Example:
+          //   nodes: [Threat, B1(failed), B2(active), Center]
+          //   indexes:  0        1             2        3
+          //   edges:  [e0, e1, e2]
+          //   firstActiveIdx = 2 (B2)
+          //   → we want e0, e1 (indices < 2) to be hot
+          const limit = Math.min(firstActiveIdx, pathEdgeIds.length);
+          for (let i = 0; i < limit; i++) {
+            hotEdgeIds.add(pathEdgeIds[i]);
+          }
+          anyPartialBreach = true;
+        }
+
         return;
       }
 
+      // Not at center yet: walk forward along outgoing edges
       const nextEdges = outEdges[currentId] || [];
       for (const e of nextEdges) {
         const nextId = e.target;
@@ -495,21 +534,31 @@ function computeFailureHighlights(nodesIn, edgesIn) {
         const nextVisited = new Set(visited);
         nextVisited.add(nextId);
 
-        let nextBarrierIds = barrierIds;
-        if (typeof nextId === "string" && nextId.startsWith("barrier_")) {
-          nextBarrierIds = [...barrierIds, nextId];
-        }
-
-        dfs(nextId, [...pathEdgeIds, e.id], nextBarrierIds, nextVisited);
+        dfs(
+          nextId,
+          [...pathEdgeIds, e.id],
+          [...pathNodeIds, nextId],
+          nextVisited
+        );
       }
     }
 
-    dfs(threatId, [], [], new Set([threatId]));
+    // Start DFS from this threat node
+    dfs(threatId, [], [threatId], new Set([threatId]));
 
-    if (anyBreach) {
+    // Mark the threat as “breached” if there is *any* hot path coming out of it
+    if (anyCenterBreach || anyPartialBreach) {
       hotThreatIds.add(threatId);
     }
   }
+
+  // Run that for each threat
+  nodes.forEach((n) => {
+    if (typeof n.id === "string" && n.id.startsWith("threat_")) {
+      processThreat(n.id);
+    }
+  });
+
 
   nodes.forEach((n) => {
     if (typeof n.id === "string" && n.id.startsWith("threat_")) {

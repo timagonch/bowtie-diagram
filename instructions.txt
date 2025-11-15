@@ -1,5 +1,5 @@
-C:\Users\tjgon\Desktop\Data_Science_UNCC\Fall_2025\Storytelling\bowtie-diagram\bowtie_flow_component\frontend> npm run dev  
+C:\Users\tjgon\Desktop\Data_Science_UNCC\Fall_2025\Storytelling\bowtie-diagram\bowtie_flow_component\frontend> npm run build 
 
-C:\Users\tjgon\Desktop\Data_Science_UNCC\Fall_2025\Storytelling\bowtie-diagram> $env:BOWTIE_DEV="1"; uv run streamlit run rf_bowtie_app.py
+C:\Users\tjgon\Desktop\Data_Science_UNCC\Fall_2025\Storytelling\bowtie-diagram> uv run streamlit run rf_bowtie_app.py
 
 
