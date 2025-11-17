@@ -131,7 +131,7 @@ http://localhost:8501
   - Connects from **above → into the top** of the Top Event.  
   - Rendered as a **triangle** with **black and yellow diagonal hazard stripes**.
 
-- **⚠ Threat**  
+- **🔥 Threat**  
   - Events on the **left side** that can trigger the Top Event (e.g., *“Loss of braking effectiveness”*).  
   - Uses the same node family but styled as a rectangular “threat” box.
 

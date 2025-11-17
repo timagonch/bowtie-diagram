@@ -1470,7 +1470,7 @@ class BowtieFlowComponent extends StreamlitComponentBase {
 
     if (kind === "threat") {
       idPrefix = "threat";
-      baseLabel = `⚠ Threat: ${displayLabel}`;
+      baseLabel = `🔥 Threat: ${displayLabel}`;
       meta = {
         kind: "threat",
       };
@@ -1786,7 +1786,7 @@ class BowtieFlowComponent extends StreamlitComponentBase {
     const baseLabel = node.data.baseLabel || node.data.label || "";
     const cleaned = baseLabel
       .replace(/^⚠ Hazard:\s*/i, "")
-      .replace(/^⚠ Threat:\s*/i, "")
+      .replace(/^🔥 Threat:\s*/i, "")
       .replace(/^❗ Consequence:\s*/i, "")
       .replace(/^🛡 Barrier:\s*/i, "")
       .replace(/^🎯\s*/, "");
@@ -1850,7 +1850,7 @@ class BowtieFlowComponent extends StreamlitComponentBase {
             baseLabel = `⚠ Hazard: ${cleanedLabel}`;
             meta.kind = "hazard";
           } else if (kind === "threat") {
-            baseLabel = `⚠ Threat: ${cleanedLabel}`;
+            baseLabel = `🔥 Threat: ${cleanedLabel}`;
             meta.kind = "threat";
           } else if (kind === "consequence") {
             baseLabel = `❗ Consequence: ${cleanedLabel}`;
@@ -2184,7 +2184,7 @@ class BowtieFlowComponent extends StreamlitComponentBase {
       const baseLabel = node.data.baseLabel || node.data.label || "";
       const cleaned = baseLabel
         .replace(/^⚠ Hazard:\s*/i, "")
-        .replace(/^⚠ Threat:\s*/i, "")
+        .replace(/^🔥 Threat:\s*/i, "")
         .replace(/^❗ Consequence:\s*/i, "")
         .replace(/^🛡 Barrier:\s*/i, "")
         .replace(/^🎯\s*/, "");
