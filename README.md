@@ -1,32 +1,52 @@
 # 🧠 Bow-Tie Risk Visualizer (ReactFlow + Streamlit)
 
-An advanced **Bow-Tie Risk Diagram Builder** that supports hazards, threats, preventive & mitigative barriers, consequences, live breach propagation, branch collapsing, barrier metadata, spotlight highlighting, PNG export, and JSON save/load.
+Modern organizations face increasingly complex operational risks, where a single failure can cascade into severe consequences. This tool provides an **interactive, logic-driven Bow-Tie risk visualization** that makes those chains of events visible and explainable.  
+For example, if a **truck loses control on a highway**, you can model the hazard (e.g., “Loaded truck traveling on wet road”), threats (e.g., “Loss of braking”), preventive barriers, the **Top Event** (“Truck loses control on highway”), mitigative barriers, and consequences. As barriers fail in the model, the bow-tie visually shows which paths breach the Top Event and how far the consequences propagate.  
+By simulating barrier performance, highlighting breach paths, and collapsing complex branches, this visualizer helps companies identify where controls truly matter and communicate risk in a way non-technical stakeholders can understand.
 
-Built with:
+👉 Live prototype: **https://bowtie-diagram.streamlit.app/**
 
-- **ReactFlow** (visual graph engine)  
-- **Streamlit** (Python host app)  
+---
+
+## 🛡️ What This Tool Does
+
+The **Bow-Tie Risk Visualizer** is an advanced Bow-Tie diagram builder that supports:
+
+- **Hazards, Threats, Preventive Barriers, Mitigative Barriers, Consequences**
+- Live **breach detection and propagation** from threat → Top Event → consequences
+- **Hazard → Top Event** wiring assumptions (hazards feed into the top of the Top Event)
+- **Branch collapsing** (threat side and consequence side) with synthetic shortcut edges
+- **Barrier metadata**: type, medium, responsible party, and failure state
+- **Spotlight highlighting** for a single branch (dims all others)
+- **JSON export & import** (schema-style structure, collapse-safe)
+- **PNG export** of the canvas (no overlays, suitable for reports)
+- Configurable **canvas & grid styling** (background, grid type, spacing)
+
+Technically, it is built with:
+
+- **ReactFlow** (visual graph engine)
+- **Streamlit** (Python host application)
 - A custom Streamlit component in `bowtie_flow_component/frontend`
 
 ---
 
 ## 🗂️ Project Structure
 
-```
+```text
 BOWTIE/
 │
 ├── bowtie_flow_component/
 │   ├── __init__.py
-│   ├── component.py
+│   ├── component.py                 # Streamlit ↔ React bridge
 │   └── frontend/
 │       ├── src/
-│       │   └── index.jsx      ← Full Bowtie ReactFlow editor
+│       │   └── index.jsx            # Full Bow-Tie ReactFlow editor
 │       ├── index.html
 │       ├── package.json
 │       ├── node_modules/
 │       └── dist/
 │
-├── rf_bowtie_app.py         ← Streamlit app
+├── rf_bowtie_app.py                 # Streamlit host app
 ├── pyproject.toml
 ├── uv.lock
 └── README.md
@@ -36,212 +56,238 @@ BOWTIE/
 
 ## ⚙️ Requirements
 
-### Python  
-- Python **3.9+**  
+### Python
+
+- Python **3.9+**
 - [`uv`](https://github.com/astral-sh/uv)
 
-### JavaScript  
-- Node.js (LTS recommended)  
-- npm  
+### JavaScript
+
+- Node.js (LTS recommended)
+- npm
 
 ---
 
-## 🚀 Running the App
+## 🚀 Getting Started
 
-You must run **two terminals**: React frontend + Streamlit backend.
+You will typically run **two processes**: a React dev server and a Streamlit app.
 
----
-
-### 1️⃣ Clone the repo
+### 1️⃣ Clone the Repository
 
 ```bash
-git clone https://github.com/<your-username>/<repo>.git
-cd <repo>
+git clone https://github.com/timagonch/bowtie-diagram.git
+cd bowtie-diagram
 ```
 
----
-
-### 2️⃣ Install Python dependencies
+### 2️⃣ Install Python Dependencies
 
 ```bash
 uv sync
 ```
 
-Creates `.venv` and installs dependencies.
+Creates and manages a `.venv` based on `pyproject.toml`.
 
----
-
-### 3️⃣ Install frontend dependencies
+### 3️⃣ Install Frontend Dependencies
 
 ```bash
 cd bowtie_flow_component/frontend
 npm install
 ```
 
----
+### 4️⃣ Run the App
 
-### 4️⃣ Start both servers
-
-#### Terminal 1 — ReactFlow dev server
+In **Terminal 1** (React dev server):
 
 ```bash
 npm run dev
 ```
 
-Runs at `http://localhost:3000` (or next available port).
-
-#### Terminal 2 — Streamlit backend
+In **Terminal 2** (Streamlit backend, from project root):
 
 ```bash
 uv run streamlit run rf_bowtie_app.py
 ```
 
-Opens:
+Open Streamlit at:
 
-```
+```text
 http://localhost:8501
 ```
 
-> ⚠ **Keep both terminals running** while using the app.
+> Keep **both** processes running while using the editor.
 
 ---
 
-## 🎨 Editor Features
+## 🎨 Node Types & Visual Design
 
 ### Node Types
-- **🎯 Top Event** (pulsates red when breached)
-- **⚠ Hazard** — connects from the **top** into the Top Event  
-- **⚠ Threat**
-- **🛡 Barrier** (preventive / mitigative)
-- **❗ Consequence**
+
+- **🎯 Top Event (center)**  
+  - Represents the central event (e.g., *“Truck loses control on highway”*).  
+  - Pulses red when breached.
+
+- **⚠ Hazard**  
+  - Represents underlying hazardous conditions (e.g., *“Loaded truck in bad weather”*).  
+  - Connects from **above → into the top** of the Top Event.  
+  - Rendered as a **triangle** with **black and yellow diagonal hazard stripes**.
+
+- **⚠ Threat**  
+  - Events on the **left side** that can trigger the Top Event (e.g., *“Loss of braking effectiveness”*).  
+  - Uses the same node family but styled as a rectangular “threat” box.
+
+- **🛡 Barrier**  
+  - Two kinds:
+    - **Preventive** – between Threats and the Top Event.  
+    - **Mitigative** – between the Top Event and Consequences.  
+  - Metadata includes:
+    - Medium: Human / Hardware / Human–Hardware  
+    - Responsible Party  
+    - Status: Active / Failed  
+
+- **❗ Consequence**  
+  - Outcomes on the **right side** if the Top Event occurs.
 
 ---
 
-## ✏️ Node Editing (Double-Click)
+## ✏️ Editing & Building Diagrams
 
-All nodes support text editing.  
-Barriers additionally support:
+### Adding Nodes
 
-- Preventive / Mitigative  
-- Human / Hardware / Human–Hardware  
-- Responsible Party  
-- Failure State (Active / Failed)  
-- Auto-generated metadata block beneath the label  
+- **Right-click empty canvas** → Add:
+  - Threat  
+  - Barrier  
+  - Hazard  
+  - Consequence  
+  - Top Event  
 
-Hazards & Top Event support label-only editing.
+### Editing Nodes
 
----
+Right-click → **Edit…** (primary workflow)
 
-## 🖱 Right-Click Menus
+Hazard & Top Event:  
+- Label only
 
-### On empty canvas
-- Add Threat / Barrier / Hazard / Consequence / Top Event
+Barrier metadata:  
+- Type  
+- Medium  
+- Responsible party  
+- Status (active/failed)  
+- Show/hide metadata block
 
-### On nodes
-- Edit node  
-- Collapse / Expand threat branch  
-- Collapse / Expand consequence branch  
-- Mark barrier as Active / Failed  
-- Hide / Show barrier metadata  
-- Highlight / Unhighlight branch (spotlight mode)  
-- Delete node  
+### Connecting Nodes
 
-### On edges
-- Highlight / Unhighlight branch  
-- Insert barrier into that edge (auto-splitting)  
-- Delete connection  
-- Synthetic collapse edges cannot be deleted manually
+- Drag between node handles
+- Hazards connect **from bottom → Top Event top**
+- Threats connect on left
+- Consequences connect on right
 
 ---
 
-## 🔥 Breach Detection Logic
+## 🔥 Breach Logic & Visual Feedback
 
 ### Threat → Top Event
-A threat path is **breached** if:
 
-- All preventive barriers on that path are **failed**, or  
-- There are **no barriers**
+A Threat path breaches if:
 
-When breached:
-- Path edges turn **red & animated**
-- Threat becomes breached
-- Top Event pulses red and is marked breached
+- No barriers exist, or  
+- All barriers on the path are **failed**
+
+Effects:
+
+- Path edges turn **animated red**
+- Threat node becomes breached
+- Top Event pulses red
+- Hazards feeding a breached Top Event show **red-tinted stripes**
+
+---
 
 ### Top Event → Consequence
-If Top Event is breached:
-- Breach propagates **rightward**
-- Stops at **active mitigative barriers**
-- Continues through **failed mitigative barriers**
-- Consequences reached by a breach become breached
 
-### Hazard Behavior
-If Top Event is breached:
-- All hazards feeding it become breached  
-- Hazards always connect from **top → Top Event**
+If the Top Event is breached:
+
+- Red propagates rightward
+- Stops at **active mitigative barriers**
+- Continues through **failed** mitigative barriers
+- Consequences reached become breached
 
 ---
 
 ## 🔽 Branch Collapsing
 
-### Threat Collapsing
-- Hides all nodes **between Threat → Top Event**  
-- Adds synthetic short-cut edge Threat → Top Event  
-- Synthetic edge preserves breach coloring
+### Threat Collapse
 
-### Consequence Collapsing
-- Hides mitigative barriers **between Top Event → Consequence**  
-- Adds synthetic Top Event → Consequence shortcut  
-- Breach styling preserved
+- Hides nodes between **Threat → Top Event**
+- Creates synthetic shortcut
+- Preserves breach color if breached
 
-Both collapse types are independent.
+### Consequence Collapse
 
----
-
-## 🔦 Branch Highlighting (Spotlight Mode)
-
-Highlighting a branch:
-- Selected path → full opacity and color  
-- Everything else becomes **50% transparent + grayscale**  
-- Toggle again to remove highlight
+- Hides nodes between **Top Event → Consequence**
+- Creates synthetic shortcut
 
 ---
 
-## 💾 Exporting & Importing
+## 🔦 Spotlight Highlighting
 
-### Export JSON
-- Reconstructable structure  
-- Preserves positions  
-- Includes barrier metadata  
-- Excludes synthetic collapse edges
+Right-click → **Highlight branch**
 
-### Import JSON
-- Fully rehydrated  
-- Recalculates breach states  
-- Clears collapse state on load
+- Highlight path = full color  
+- All other branches dim to ~25% opacity + grayscale  
+- Toggle again to remove  
 
-### Save PNG
-- High-resolution export  
-- Canvas only (menus & toolbars excluded)  
-- Uses your custom background color  
+---
+
+## 💾 Export, Import & PNG
+
+### JSON Export
+
+- Saves:
+  - Node positions  
+  - Labels  
+  - Metadata  
+  - Canonical edges  
+- Does **not** save synthetic collapse edges
+
+### JSON Import
+
+- Restores nodes & edges  
+- Recomputes breach logic  
+- Resets collapse state
+
+### PNG Export
+
+- High-resolution  
+- Excludes UI overlays  
+- Uses canvas background color  
 
 ---
 
 ## 🧭 Canvas Controls
 
-- Right-click empty space → create node  
-- Drag nodes to reposition  
-- Drag handles to connect nodes  
-- Right-click edges → manage connection  
-- Scroll / pinch / drag → navigate  
-- MiniMap & Controls included  
-- Optional background grid (dots / lines / cross)  
-- Adjustable background + grid colors  
+- **Right-click empty** → Add node  
+- **Right-click node** → Edit / collapse / highlight / delete / barrier actions  
+- **Right-click edge** → Highlight / insert barrier / delete  
+- Drag nodes or edges  
+- Scroll/drag to navigate  
+- Grid customization: dots / lines / cross + color + spacing  
 
 ---
 
-## 👥 Credits
+## 👥 Project Team
 
 **Bow-Tie Risk Visualizer**  
-UNC Charlotte · Visual Storytelling · Fall 2025  
+UNC Charlotte — DSBA 5122 — Fall 2025  
 
-Author: **Timothy Goncharov**
+**Team Members:**
+
+- **Timothy Goncharov**
+- **Shamsa Yusuf**
+- **Daniel Miller**
+- **Vyncent Harris**
+
+---
+
+## 🏛️ Acknowledgement
+
+**Acknowledgement:**  
+*This is a student project developed for DSBA 5122 in collaboration with Todus Advisors. Bowtie Symbols are proprietary of Todus Advisors.*
