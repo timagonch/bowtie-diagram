@@ -2,7 +2,6 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { toPng } from "html-to-image";
 
-
 import ReactFlow, {
   Background,
   Controls,
@@ -22,7 +21,7 @@ import {
 } from "streamlit-component-lib";
 
 const DEFAULT_EDGE_STROKE = "#94a3b8"; // slate-300
-const DEFAULT_EDGE_WIDTH  = 2;
+const DEFAULT_EDGE_WIDTH = 2;
 
 /**
  * ---------- Pulsing CSS for breached Top Event ----------
@@ -125,8 +124,6 @@ function applyBarrierLabel(node) {
 
   node.data.label = `${base}\n${divider}\n${mediumLine}\n${responsibleLine}`;
 }
-
-
 
 /**
  * Collect all nodes+edges in the connected branch starting from a node.
@@ -264,11 +261,15 @@ function applyConsequenceCollapse(nodesIn, edgesIn, collapsedConseqIds) {
   }
 
   const nodesById = {};
-  nodes.forEach((n) => { nodesById[n.id] = n; });
+  nodes.forEach((n) => {
+    nodesById[n.id] = n;
+  });
 
   // Build adjacency (source -> outgoing edges)
   const outEdges = {};
-  nodes.forEach((n) => { outEdges[n.id] = []; });
+  nodes.forEach((n) => {
+    outEdges[n.id] = [];
+  });
   viewEdges.forEach((e) => {
     if (outEdges[e.source]) outEdges[e.source].push(e);
   });
@@ -281,7 +282,9 @@ function applyConsequenceCollapse(nodesIn, edgesIn, collapsedConseqIds) {
     ? centerCandidates[centerCandidates.length - 1].id
     : null;
 
-  const existingConseqs = (collapsedConseqIds || []).filter((cid) => !!nodesById[cid]);
+  const existingConseqs = (collapsedConseqIds || []).filter(
+    (cid) => !!nodesById[cid]
+  );
   const collapsedSet = new Set(existingConseqs);
 
   // Keep track of nodes hidden in THIS pass, but also respect nodes already hidden
@@ -330,7 +333,7 @@ function applyConsequenceCollapse(nodesIn, edgesIn, collapsedConseqIds) {
       );
       if (!alreadyHas) {
         const conseqNode = nodesById[conseqId];
-        const cMeta = (conseqNode?.data?.meta) || {};
+        const cMeta = conseqNode?.data?.meta || {};
         const breached = !!cMeta.breached;
 
         const collapseEdge = {
@@ -363,8 +366,6 @@ function applyConsequenceCollapse(nodesIn, edgesIn, collapsedConseqIds) {
   return { nodes, edges: viewEdges };
 }
 
-
-
 /**
  * Core “breach” engine:
  * - If ALL barriers on a Threat → Top Event path are failed (or there are none),
@@ -374,6 +375,10 @@ function applyConsequenceCollapse(nodesIn, edgesIn, collapsedConseqIds) {
  *   - If mitigative barrier is active → block there.
  *   - If mitigative barrier failed → continue to Consequence and mark it red.
  * - Branch highlighting overlays styles on top of breach coloring.
+ *
+ * NEW: we distinguish full vs partial breaches so that collapse logic
+ * only paints Threat → Top Event shortcut edges red when the Top Event
+ * is *actually* breached from that threat.
  */
 function computeFailureHighlights(nodesIn, edgesIn) {
   // Deep-ish clone nodes and edges so we don't mutate original references
@@ -385,7 +390,6 @@ function computeFailureHighlights(nodesIn, edgesIn) {
       meta: { ...((n.data || {}).meta || {}) },
     },
     style: { ...(n.style || {}) },
-    // NOTE: no className manipulation anymore
   }));
 
   const edges = (edgesIn || []).map((e) => ({
@@ -397,8 +401,9 @@ function computeFailureHighlights(nodesIn, edgesIn) {
   const nodesById = {};
   nodes.forEach((n) => {
     ensureMeta(n);
-    // reset breach flag; will be recomputed
+    // reset breach flags; will be recomputed
     n.data.meta.breached = false;
+    n.data.meta.partiallyBreached = false;
     nodesById[n.id] = n;
   });
 
@@ -452,80 +457,88 @@ function computeFailureHighlights(nodesIn, edgesIn) {
   });
 
   const hotEdgeIds = new Set();
-  const hotThreatIds = new Set();
+  const fullThreatIds = new Set(); // Threats that fully breach the Top Event
+  const partialThreatIds = new Set(); // Threats that have red edges but are blocked
   const hotConsequenceIds = new Set();
   let centerIsHot = false;
 
-  // ---------- 1) Threat → Top Event breach detection ----------
-    // ---------- 1) Threat → Top Event breach detection ----------
   function processThreat(threatId) {
-    // Track two kinds of “breach”:
-    // - anyCenterBreach: at least one path fully reaches Top Event with no active barriers
-    // - anyPartialBreach: path is blocked by an active barrier, but some edges up to that
-    //   barrier should still go red
+    // anyCenterBreach: at least one path reaches Top Event with NO active barriers
+    // anyPartialBreach: at least one path has failed barriers but is later blocked by an active barrier
     let anyCenterBreach = false;
     let anyPartialBreach = false;
 
-    function dfs(currentId, pathEdgeIds, pathNodeIds, visited) {
-      // Reached Top Event (center) along some path from this threat
-      if (currentId === centerId) {
-        // pathNodeIds = [threat, ..., center]
-        // pathEdgeIds = edges between those nodes, in order
+    function evaluatePath(pathNodeIds, pathEdgeIds) {
+      // pathNodeIds: [Threat, ..., TopEvent]
+      // pathEdgeIds: [e0, e1, ..., eN-1] between those nodes
+      let hasFailed = false;
+      let blockedByActive = false;
+      let lastHotEdgeIdxExclusive = -1;
 
-        // Collect barrier nodes in order along the path
-        const barrierSeq = [];
-        for (let i = 0; i < pathNodeIds.length; i++) {
-          const nid = pathNodeIds[i];
-          if (typeof nid === "string" && nid.startsWith("barrier_")) {
-            barrierSeq.push({ id: nid, idx: i });
-          }
-        }
+      // Walk the path from Threat → ... → TopEvent
+      // and look at barriers in the order they appear.
+      for (let i = 1; i < pathNodeIds.length; i++) {
+        const nid = pathNodeIds[i];
+        const node = nodesById[nid];
+        if (!node) continue;
 
-        // No barriers at all → full breach (same as before)
-        if (barrierSeq.length === 0) {
-          pathEdgeIds.forEach((eid) => hotEdgeIds.add(eid));
-          centerIsHot = true;
-          anyCenterBreach = true;
-          return;
-        }
+        const isBarrier =
+          typeof nid === "string" && nid.startsWith("barrier_");
+        if (!isBarrier) continue;
 
-        // There is at least one barrier: find the FIRST active barrier
-        let firstActiveIdx = -1;
-        for (const { id, idx } of barrierSeq) {
-          const bNode = nodesById[id];
-          const bMeta = (bNode && bNode.data && bNode.data.meta) || {};
-          if (!bMeta.failed) {
-            firstActiveIdx = idx;
-            break;
-          }
-        }
+        const bMeta = (node.data && node.data.meta) || {};
+        const failed = !!bMeta.failed;
 
-        if (firstActiveIdx === -1) {
-          // All barriers on this path are failed → full breach to Top Event
-          pathEdgeIds.forEach((eid) => hotEdgeIds.add(eid));
-          centerIsHot = true;
-          anyCenterBreach = true;
+        if (failed) {
+          // Failed barrier → threat passes through, we will potentially mark edges up to here as hot.
+          hasFailed = true;
+          // Edge index just before this node is (i - 1), so hot edges are at least up to this point.
+          lastHotEdgeIdxExclusive = i; // edges [0 .. i-1]
         } else {
-          // At least one barrier is ACTIVE.
-          // We still want red from the threat up TO that first active barrier.
-          //
-          // Example:
-          //   nodes: [Threat, B1(failed), B2(active), Center]
-          //   indexes:  0        1             2        3
-          //   edges:  [e0, e1, e2]
-          //   firstActiveIdx = 2 (B2)
-          //   → we want e0, e1 (indices < 2) to be hot
-          const limit = Math.min(firstActiveIdx, pathEdgeIds.length);
-          for (let i = 0; i < limit; i++) {
-            hotEdgeIds.add(pathEdgeIds[i]);
+          // Active barrier → path is blocked.
+          blockedByActive = true;
+
+          // If we already passed through at least one failed barrier before,
+          // we want red edges all the way up to this active barrier.
+          if (hasFailed && i > lastHotEdgeIdxExclusive) {
+            lastHotEdgeIdxExclusive = i; // include edge into this barrier
+          }
+          break;
+        }
+      }
+
+      if (!blockedByActive) {
+        // No active barrier before Top Event:
+        // - either there were no barriers at all, or
+        // - all barriers encountered were failed.
+        // → Full breach: make the entire path hot and mark Top Event as breached.
+        for (let idx = 0; idx < pathEdgeIds.length; idx++) {
+          hotEdgeIds.add(pathEdgeIds[idx]);
+        }
+        centerIsHot = true;
+        anyCenterBreach = true;
+      } else {
+        // Blocked by an active barrier:
+        // - If we had at least one failed barrier earlier, it's a partial breach,
+        //   and we highlight edges from Threat up to the first active barrier.
+        // - If no failed barriers before the active one, nothing is red.
+        if (hasFailed && lastHotEdgeIdxExclusive > 0) {
+          const limit = Math.min(lastHotEdgeIdxExclusive, pathEdgeIds.length);
+          for (let idx = 0; idx < limit; idx++) {
+            hotEdgeIds.add(pathEdgeIds[idx]);
           }
           anyPartialBreach = true;
         }
+      }
+    }
 
+    function dfs(currentId, pathEdgeIds, pathNodeIds, visited) {
+      if (currentId === centerId) {
+        // We found a Threat → … → TopEvent path; evaluate it.
+        evaluatePath(pathNodeIds, pathEdgeIds);
         return;
       }
 
-      // Not at center yet: walk forward along outgoing edges
       const nextEdges = outEdges[currentId] || [];
       for (const e of nextEdges) {
         const nextId = e.target;
@@ -546,11 +559,15 @@ function computeFailureHighlights(nodesIn, edgesIn) {
     // Start DFS from this threat node
     dfs(threatId, [], [threatId], new Set([threatId]));
 
-    // Mark the threat as “breached” if there is *any* hot path coming out of it
-    if (anyCenterBreach || anyPartialBreach) {
-      hotThreatIds.add(threatId);
+    // Record breach type for this threat
+    if (anyCenterBreach) {
+      fullThreatIds.add(threatId);
+    }
+    if (anyPartialBreach && !anyCenterBreach) {
+      partialThreatIds.add(threatId);
     }
   }
+
 
   // Run that for each threat
   nodes.forEach((n) => {
@@ -559,14 +576,7 @@ function computeFailureHighlights(nodesIn, edgesIn) {
     }
   });
 
-
-  nodes.forEach((n) => {
-    if (typeof n.id === "string" && n.id.startsWith("threat_")) {
-      processThreat(n.id);
-    }
-  });
-
-  // Mark threat→center edges hot
+  // Apply edge coloring for threat→center paths (already recorded in hotEdgeIds)
   edges.forEach((e) => {
     if (hotEdgeIds.has(e.id)) {
       e.style = {
@@ -630,11 +640,24 @@ function computeFailureHighlights(nodesIn, edgesIn) {
   });
 
   // ---------- 3) Mark breached nodes in meta ----------
-  hotThreatIds.forEach((tid) => {
+  // Full breaches: Threats that actually reach the Top Event
+  fullThreatIds.forEach((tid) => {
     const tNode = nodesById[tid];
     if (!tNode || !tNode.data) return;
     const meta = tNode.data.meta || {};
-    meta.breached = true;
+    meta.breached = true; // full breach
+    meta.partiallyBreached = false;
+    tNode.data.meta = meta;
+  });
+
+  // Partial breaches: red edges but blocked before Top Event
+  partialThreatIds.forEach((tid) => {
+    const tNode = nodesById[tid];
+    if (!tNode || !tNode.data) return;
+    const meta = tNode.data.meta || {};
+    if (!meta.breached) {
+      meta.partiallyBreached = true;
+    }
     tNode.data.meta = meta;
   });
 
@@ -774,8 +797,11 @@ function computeFailureHighlights(nodesIn, edgesIn) {
         };
       }
     } else if (kind === "threat") {
-      if (meta.breached) {
-        // Breached threat: reddish
+      const full = !!meta.breached;
+      const partial = !!meta.partiallyBreached;
+
+      if (full || partial) {
+        // Any "hot" threat (partial or full) gets the breached styling
         n.style = {
           ...baseStyle,
           background: "#fee2e2",
@@ -816,7 +842,9 @@ function computeFailureHighlights(nodesIn, edgesIn) {
   const anyNodeHighlighted = nodes.some(
     (n) => n.data && n.data.meta && n.data.meta.highlighted
   );
-  const anyEdgeHighlighted = edges.some((e) => e.data && e.data.highlighted);
+  const anyEdgeHighlighted = edges.some(
+    (e) => e.data && e.data.highlighted
+  );
   const hasHighlight = anyNodeHighlighted || anyEdgeHighlighted;
 
   // Nodes: spotlight highlighted, dim everything else
@@ -868,14 +896,13 @@ function computeFailureHighlights(nodesIn, edgesIn) {
   return { nodes, edges };
 }
 
-
 /**
  * Collapse engine: hide all downstream barriers and add synthetic Threat → Top Event edges.
  * If a threat has breached the Top Event, the synthetic edge stays red.
  */
 function applyCollapse(nodesIn, edgesIn, collapsedThreatIds) {
   const nodes = (nodesIn || []).map((n) => ({ ...n }));
-  let   viewEdges = (edgesIn || []).map((e) => ({ ...e }));
+  let viewEdges = (edgesIn || []).map((e) => ({ ...e }));
 
   // Nothing to collapse on threat side → return as-is
   if (!collapsedThreatIds || collapsedThreatIds.length === 0) {
@@ -884,7 +911,9 @@ function applyCollapse(nodesIn, edgesIn, collapsedThreatIds) {
 
   // Index nodes & get meta.kind reliably
   const nodesById = {};
-  nodes.forEach((n) => { nodesById[n.id] = n; });
+  nodes.forEach((n) => {
+    nodesById[n.id] = n;
+  });
 
   // Find latest center
   const centerCandidates = nodes.filter(
@@ -902,7 +931,10 @@ function applyCollapse(nodesIn, edgesIn, collapsedThreatIds) {
   // Build directed adjacency: forward (src→tgt) and reverse (tgt→src)
   const fwd = {};
   const rev = {};
-  nodes.forEach((n) => { fwd[n.id] = []; rev[n.id] = []; });
+  nodes.forEach((n) => {
+    fwd[n.id] = [];
+    rev[n.id] = [];
+  });
   viewEdges.forEach((e) => {
     if (fwd[e.source]) fwd[e.source].push(e.target);
     if (rev[e.target]) rev[e.target].push(e.source);
@@ -933,7 +965,9 @@ function applyCollapse(nodesIn, edgesIn, collapsedThreatIds) {
   const needSyntheticPairs = [];
 
   // For each requested threat collapse, compute intersection to scope hiding
-  const existingThreats = (collapsedThreatIds || []).filter((tid) => !!nodesById[tid]);
+  const existingThreats = (collapsedThreatIds || []).filter(
+    (tid) => !!nodesById[tid]
+  );
   for (const threatId of existingThreats) {
     // 1) All nodes reachable forward from this threat
     const reachFromThreat = bfs(threatId, fwd);
@@ -952,11 +986,6 @@ function applyCollapse(nodesIn, edgesIn, collapsedThreatIds) {
     // Hide nodes “between” the threat and the center (keep endpoints visible)
     for (const nid of onPath) {
       if (nid === threatId || nid === centerId) continue;
-
-      // If you truly only want to hide barriers, keep this guard:
-      // const meta = nodesById[nid]?.data?.meta || {};
-      // if (meta.kind !== "barrier") continue;
-
       hiddenNodeIds.add(nid);
     }
 
@@ -965,7 +994,9 @@ function applyCollapse(nodesIn, edgesIn, collapsedThreatIds) {
   }
 
   // Apply hidden flags
-  nodes.forEach((n) => { if (hiddenNodeIds.has(n.id)) n.hidden = true; });
+  nodes.forEach((n) => {
+    if (hiddenNodeIds.has(n.id)) n.hidden = true;
+  });
 
   // Drop any edges that touch hidden nodes
   viewEdges = viewEdges.filter(
@@ -975,10 +1006,15 @@ function applyCollapse(nodesIn, edgesIn, collapsedThreatIds) {
   // Add synthetic edges (avoid duplicates)
   for (const [tId, cId] of needSyntheticPairs) {
     const already = viewEdges.some(
-      (e) => e.source === tId && e.target === cId && e.data && e.data.syntheticCollapse
+      (e) =>
+        e.source === tId &&
+        e.target === cId &&
+        e.data &&
+        e.data.syntheticCollapse
     );
     if (!already) {
-      const breached = !!(nodesById[tId]?.data?.meta?.breached);
+      // NOTE: meta.breached now means "this threat fully breaches Top Event"
+      const breached = !!nodesById[tId]?.data?.meta?.breached;
       const syn = {
         id: `collapse_${tId}_${cId}`,
         source: tId,
@@ -997,8 +1033,6 @@ function applyCollapse(nodesIn, edgesIn, collapsedThreatIds) {
 
   return { nodes, edges: viewEdges };
 }
-
-
 
 const TopEventNode = ({ data, selected, style }) => {
   const label = data?.label || "🎯 Top Event";
@@ -1022,7 +1056,6 @@ const TopEventNode = ({ data, selected, style }) => {
           : style?.boxShadow,
       }}
     >
-
       {/* Hazard input from above */}
       <Handle
         type="target"
@@ -1062,7 +1095,8 @@ const HazardNode = ({ data, selected, style }) => {
         padding: 8,
         borderRadius: 10,
         border: style?.border || "2px solid #000",
-        background: style?.background ||
+        background:
+          style?.background ||
           "repeating-linear-gradient(45deg, #facc15, #facc15 8px, #000 8px, #000 16px)",
         color: style?.color || "#000",
         minWidth: 120,
@@ -1100,8 +1134,6 @@ function ensureEdgeBaseline(viewEdges) {
   });
 }
 
-
-
 /**
  * ---------- Main component ----------
  */
@@ -1112,12 +1144,12 @@ class BowtieFlowComponent extends StreamlitComponentBase {
 
     this.state = {
       ...this.state,
-      showGrid: true,          // show/hide the dots/lines
-      bgVariant: "dots",       // "dots" | "lines" | "cross"
-      bgColor: "#0b1220",      // canvas fill color
-      gridColor: "#334155",    // dots/lines color
-      gridGap: 20,             // spacing between dots/lines
-      gridSize: 1,  
+      showGrid: true, // show/hide the dots/lines
+      bgVariant: "dots", // "dots" | "lines" | "cross"
+      bgColor: "#0b1220", // canvas fill color
+      gridColor: "#334155", // dots/lines color
+      gridGap: 20, // spacing between dots/lines
+      gridSize: 1,
       nodes: [],
       edges: [], // view edges for ReactFlow
       rawEdges: [], // canonical edges (structure)
@@ -1216,7 +1248,6 @@ class BowtieFlowComponent extends StreamlitComponentBase {
     this.cleanForSave = this.cleanForSave.bind(this);
     this.handleSavePng = this.handleSavePng.bind(this);
     this.canvasRef = React.createRef();
-
   }
 
   componentDidMount() {
@@ -1345,40 +1376,39 @@ class BowtieFlowComponent extends StreamlitComponentBase {
   }
 
   cleanForSave(nodes, rawEdges) {
-  // Only persist what's needed to rebuild: id, position, type, data (with meta/baseLabel)
-  const saveNodes = (nodes || []).map((n) => ({
-    id: n.id,
-    position: n.position,
-    type: n.type, // e.g., 'topEvent', 'hazard', or undefined for default
-    data: {
-      // Keep baseLabel + meta (includes barrier fields, highlighted flags, etc.)
-      baseLabel: n.data?.baseLabel ?? n.data?.label ?? "",
-      meta: n.data?.meta ?? {},
-      // Keep current visible label for convenience (not strictly necessary)
-      label: n.data?.baseLabel ?? n.data?.label ?? "",
-    },
-  }));
+    // Only persist what's needed to rebuild: id, position, type, data (with meta/baseLabel)
+    const saveNodes = (nodes || []).map((n) => ({
+      id: n.id,
+      position: n.position,
+      type: n.type, // e.g., 'topEvent', 'hazard', or undefined for default
+      data: {
+        // Keep baseLabel + meta (includes barrier fields, highlighted flags, etc.)
+        baseLabel: n.data?.baseLabel ?? n.data?.label ?? "",
+        meta: n.data?.meta ?? {},
+        // Keep current visible label for convenience (not strictly necessary)
+        label: n.data?.baseLabel ?? n.data?.label ?? "",
+      },
+    }));
 
-  // rawEdges is your canonical structure (no synthetic collapse edges)
-  const saveEdges = (rawEdges || []).map((e) => ({
-    id: e.id,
-    source: e.source,
-    target: e.target,
-    sourceHandle: e.sourceHandle,
-    targetHandle: e.targetHandle,
-    type: e.type || "default",
-    data: e.data && Object.keys(e.data).length ? e.data : undefined,
-  }));
+    // rawEdges is your canonical structure (no synthetic collapse edges)
+    const saveEdges = (rawEdges || []).map((e) => ({
+      id: e.id,
+      source: e.source,
+      target: e.target,
+      sourceHandle: e.sourceHandle,
+      targetHandle: e.targetHandle,
+      type: e.type || "default",
+      data: e.data && Object.keys(e.data).length ? e.data : undefined,
+    }));
 
-  return {
-    $schema: "https://todus-advisors.github/bowtie/v1",
-    version: 1,
-    saved_at: new Date().toISOString(),
-    nodes: saveNodes,
-    edges: saveEdges,
-  };
-}
-
+    return {
+      $schema: "https://todus-advisors.github/bowtie/v1",
+      version: 1,
+      saved_at: new Date().toISOString(),
+      nodes: saveNodes,
+      edges: saveEdges,
+    };
+  }
 
   // ---------- Pane context menu ----------
 
@@ -1506,7 +1536,8 @@ class BowtieFlowComponent extends StreamlitComponentBase {
     }
 
     const newNodeId = `${idPrefix}_${Date.now()}`;
-    const nodeType = kind === "center" ? "topEvent" : kind === "hazard" ? "hazard" : "default";
+    const nodeType =
+      kind === "center" ? "topEvent" : kind === "hazard" ? "hazard" : "default";
 
     const newNode = {
       id: newNodeId,
@@ -1769,7 +1800,6 @@ class BowtieFlowComponent extends StreamlitComponentBase {
 
   // ---------- Edit panel (double-click node) ----------
   onNodeDoubleClick(event, node) {
-    
     event.stopPropagation();
     console.log("Double-clicked node:", node.id, node.data?.meta?.kind);
 
@@ -1905,156 +1935,155 @@ class BowtieFlowComponent extends StreamlitComponentBase {
   }
 
   renderEditPanel() {
-  const { editPanel } = this.state;
-  if (!editPanel.visible) return null;
+    const { editPanel } = this.state;
+    if (!editPanel.visible) return null;
 
-  const panelStyle = {
-    position: "absolute",
-    top: 12,
-    right: 12,
-    background: "#111827",
-    color: "white",
-    padding: "10px 12px",
-    borderRadius: "10px",
-    boxShadow: "0 10px 25px rgba(0,0,0,0.45)",
-    zIndex: 20,
-    width: "260px",
-    fontSize: "0.85rem",
-    border: "1px solid rgba(255,255,255,0.12)",
-  };
+    const panelStyle = {
+      position: "absolute",
+      top: 12,
+      right: 12,
+      background: "#111827",
+      color: "white",
+      padding: "10px 12px",
+      borderRadius: "10px",
+      boxShadow: "0 10px 25px rgba(0,0,0,0.45)",
+      zIndex: 20,
+      width: "260px",
+      fontSize: "0.85rem",
+      border: "1px solid rgba(255,255,255,0.12)",
+    };
 
-  const inputStyle = {
-    width: "100%",
-    marginTop: "4px",
-    marginBottom: "6px",
-    padding: "3px 6px",
-    fontSize: "0.85rem",
-  };
+    const inputStyle = {
+      width: "100%",
+      marginTop: "4px",
+      marginBottom: "6px",
+      padding: "3px 6px",
+      fontSize: "0.85rem",
+    };
 
-  return (
-    <div style={panelStyle} onClick={(e) => e.stopPropagation()}>
-      <div style={{ fontWeight: 600, marginBottom: "4px" }}>Edit node</div>
+    return (
+      <div style={panelStyle} onClick={(e) => e.stopPropagation()}>
+        <div style={{ fontWeight: 600, marginBottom: "4px" }}>Edit node</div>
 
-      {/* Label (for all node types) */}
-      <label style={{ display: "block", marginTop: "4px" }}>
-        Label
-        <input
-          style={inputStyle}
-          type="text"
-          value={editPanel.label}
-          onChange={(e) =>
-            this.handleEditFieldChange("label", e.target.value)
-          }
-        />
-      </label>
+        {/* Label (for all node types) */}
+        <label style={{ display: "block", marginTop: "4px" }}>
+          Label
+          <input
+            style={inputStyle}
+            type="text"
+            value={editPanel.label}
+            onChange={(e) =>
+              this.handleEditFieldChange("label", e.target.value)
+            }
+          />
+        </label>
 
-      {/* Barrier-specific metadata */}
-      {editPanel.kind === "barrier" && (
-        <>
-          <label style={{ display: "block", marginTop: "4px" }}>
-            Barrier type
-            <select
-              style={inputStyle}
-              value={editPanel.barrierType}
-              onChange={(e) =>
-                this.handleEditFieldChange("barrierType", e.target.value)
-              }
-            >
-              <option value="preventive">Preventive</option>
-              <option value="mitigative">Mitigative</option>
-            </select>
-          </label>
+        {/* Barrier-specific metadata */}
+        {editPanel.kind === "barrier" && (
+          <>
+            <label style={{ display: "block", marginTop: "4px" }}>
+              Barrier type
+              <select
+                style={inputStyle}
+                value={editPanel.barrierType}
+                onChange={(e) =>
+                  this.handleEditFieldChange("barrierType", e.target.value)
+                }
+              >
+                <option value="preventive">Preventive</option>
+                <option value="mitigative">Mitigative</option>
+              </select>
+            </label>
 
-          <label style={{ display: "block", marginTop: "4px" }}>
-            Medium
-            <select
-              style={inputStyle}
-              value={editPanel.barrierMedium}
-              onChange={(e) =>
-                this.handleEditFieldChange("barrierMedium", e.target.value)
-              }
-            >
-              <option value="human">Human</option>
-              <option value="hardware">Hardware</option>
-              <option value="human-hardware">Human–Hardware</option>
-            </select>
-          </label>
+            <label style={{ display: "block", marginTop: "4px" }}>
+              Medium
+              <select
+                style={inputStyle}
+                value={editPanel.barrierMedium}
+                onChange={(e) =>
+                  this.handleEditFieldChange("barrierMedium", e.target.value)
+                }
+              >
+                <option value="human">Human</option>
+                <option value="hardware">Hardware</option>
+                <option value="human-hardware">Human–Hardware</option>
+              </select>
+            </label>
 
-          <label style={{ display: "block", marginTop: "4px" }}>
-            Responsible Party
-            <input
-              style={inputStyle}
-              type="text"
-              value={editPanel.responsibleParty || ""}
-              onChange={(e) =>
-                this.handleEditFieldChange(
-                  "responsibleParty",
-                  e.target.value
-                )
-              }
-            />
-          </label>
+            <label style={{ display: "block", marginTop: "4px" }}>
+              Responsible Party
+              <input
+                style={inputStyle}
+                type="text"
+                value={editPanel.responsibleParty || ""}
+                onChange={(e) =>
+                  this.handleEditFieldChange(
+                    "responsibleParty",
+                    e.target.value
+                  )
+                }
+              />
+            </label>
 
-          <label style={{ display: "block", marginTop: "4px" }}>
-            Status
-            <select
-              style={inputStyle}
-              value={editPanel.failed ? "failed" : "active"}
-              onChange={(e) =>
-                this.handleEditFieldChange(
-                  "failed",
-                  e.target.value === "failed"
-                )
-              }
-            >
-              <option value="active">Active (working)</option>
-              <option value="failed">Failed</option>
-            </select>
-          </label>
-        </>
-      )}
+            <label style={{ display: "block", marginTop: "4px" }}>
+              Status
+              <select
+                style={inputStyle}
+                value={editPanel.failed ? "failed" : "active"}
+                onChange={(e) =>
+                  this.handleEditFieldChange(
+                    "failed",
+                    e.target.value === "failed"
+                  )
+                }
+              >
+                <option value="active">Active (working)</option>
+                <option value="failed">Failed</option>
+              </select>
+            </label>
+          </>
+        )}
 
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "flex-end",
-          gap: "6px",
-          marginTop: "8px",
-        }}
-      >
-        <button
+        <div
           style={{
-            padding: "3px 8px",
-            fontSize: "0.8rem",
-            background: "#374151",
-            border: "none",
-            borderRadius: "4px",
-            color: "white",
-            cursor: "pointer",
+            display: "flex",
+            justifyContent: "flex-end",
+            gap: "6px",
+            marginTop: "8px",
           }}
-          onClick={this.handleEditCancel}
         >
-          Cancel
-        </button>
-        <button
-          style={{
-            padding: "3px 8px",
-            fontSize: "0.8rem",
-            background: "#3b82f6",
-            border: "none",
-            borderRadius: "4px",
-            color: "white",
-            cursor: "pointer",
-          }}
-          onClick={this.handleEditSave}
-        >
-          Save
-        </button>
+          <button
+            style={{
+              padding: "3px 8px",
+              fontSize: "0.8rem",
+              background: "#374151",
+              border: "none",
+              borderRadius: "4px",
+              color: "white",
+              cursor: "pointer",
+            }}
+            onClick={this.handleEditCancel}
+          >
+            Cancel
+          </button>
+          <button
+            style={{
+              padding: "3px 8px",
+              fontSize: "0.8rem",
+              background: "#3b82f6",
+              border: "none",
+              borderRadius: "4px",
+              color: "white",
+              cursor: "pointer",
+            }}
+            onClick={this.handleEditSave}
+          >
+            Save
+          </button>
+        </div>
       </div>
-    </div>
-  );
-}
-
+    );
+  }
 
   // ---------- Node context menu (collapse / delete / barrier actions) ----------
 
@@ -2154,7 +2183,6 @@ class BowtieFlowComponent extends StreamlitComponentBase {
       edgeMenu: { ...state.edgeMenu, visible: false },
     }));
   }
-
 
   handleNodeMenuClose() {
     this.setState((state) => ({
@@ -2440,7 +2468,6 @@ class BowtieFlowComponent extends StreamlitComponentBase {
     }
   }
 
-
   renderNodeMenu() {
     const { nodeMenu } = this.state;
     if (!nodeMenu.visible) return null;
@@ -2641,7 +2668,6 @@ class BowtieFlowComponent extends StreamlitComponentBase {
       </div>
     );
   }
-
 
   // ---------- Edge context menu (delete connection / insert node / highlight) ----------
 
@@ -2923,446 +2949,447 @@ class BowtieFlowComponent extends StreamlitComponentBase {
   // ---------- Render ----------
 
   render() {
-  const { nodes, edges } = this.state;
-  const height = this.props.args.height || 1000;
+    const { nodes, edges } = this.state;
+    const height = this.props.args.height || 1000;
 
-  const nodeTypes = {
-    topEvent: TopEventNode,
-    hazard: HazardNode,
-  };
+    const nodeTypes = {
+      topEvent: TopEventNode,
+      hazard: HazardNode,
+    };
 
-  return (
-    <div
-      ref={this.canvasRef} 
-      style={{
-        width: "100%",
-        height: `${height}px`,
-        position: "relative",
-        background: this.state.bgColor,
-      }}
-    >
-      {/* Export / Import toolbar */}
+    return (
       <div
-        data-bowtie-overlay="1"
+        ref={this.canvasRef}
         style={{
-          position: "absolute",
-          top: 8,
-          left: 8,
-          zIndex: 30,
-          display: "flex",
-          gap: 8,
-          background: "rgba(2,6,23,0.9)",
-          border: "1px solid rgba(148,163,184,0.4)",
-          borderRadius: 8,
-          padding: "6px 8px",
-          boxShadow: "0 6px 18px rgba(0,0,0,0.6)",
+          width: "100%",
+          height: `${height}px`,
+          position: "relative",
+          background: this.state.bgColor,
         }}
       >
-        <button
-          onClick={this.handleExport}
+        {/* Export / Import toolbar */}
+        <div
+          data-bowtie-overlay="1"
           style={{
-            padding: "4px 8px",
-            fontSize: "0.82rem",
-            background: "#10b981",
-            color: "white",
-            border: "none",
-            borderRadius: 6,
-            cursor: "pointer",
+            position: "absolute",
+            top: 8,
+            left: 8,
+            zIndex: 30,
+            display: "flex",
+            gap: 8,
+            background: "rgba(2,6,23,0.9)",
+            border: "1px solid rgba(148,163,184,0.4)",
+            borderRadius: 8,
+            padding: "6px 8px",
+            boxShadow: "0 6px 18px rgba(0,0,0,0.6)",
           }}
         >
-          Export JSON
-        </button>
-
-        <button
-          onClick={this.handleImportClick}
-          style={{
-            padding: "4px 8px",
-            fontSize: "0.82rem",
-            background: "#3b82f6",
-            color: "white",
-            border: "none",
-            borderRadius: 6,
-            cursor: "pointer",
-          }}
-        >
-          Import JSON
-        </button>
+          <button
+            onClick={this.handleExport}
+            style={{
+              padding: "4px 8px",
+              fontSize: "0.82rem",
+              background: "#10b981",
+              color: "white",
+              border: "none",
+              borderRadius: 6,
+              cursor: "pointer",
+            }}
+          >
+            Export JSON
+          </button>
 
           <button
-          onClick={this.handleSavePng}
+            onClick={this.handleImportClick}
+            style={{
+              padding: "4px 8px",
+              fontSize: "0.82rem",
+              background: "#3b82f6",
+              color: "white",
+              border: "none",
+              borderRadius: 6,
+              cursor: "pointer",
+            }}
+          >
+            Import JSON
+          </button>
+
+          <button
+            onClick={this.handleSavePng}
+            style={{
+              padding: "4px 8px",
+              fontSize: "0.82rem",
+              background: "#f59e0b",
+              color: "white",
+              border: "none",
+              borderRadius: 6,
+              cursor: "pointer",
+            }}
+          >
+            Save PNG
+          </button>
+
+          {/* Hidden file input for imports */}
+          <input
+            ref={this.fileInputRef}
+            type="file"
+            accept="application/json,.json"
+            style={{ display: "none" }}
+            onChange={this.handleImportFileChange}
+          />
+        </div>
+
+        {/* Grid/background controls overlay */}
+        <div
+          data-bowtie-overlay="1"
           style={{
-            padding: "4px 8px",
-            fontSize: "0.82rem",
-            background: "#f59e0b",
-            color: "white",
-            border: "none",
-            borderRadius: 6,
-            cursor: "pointer",
-          }}
-        >
-          Save PNG
-        </button>
-
-
-        {/* Hidden file input for imports */}
-        <input
-          ref={this.fileInputRef}
-          type="file"
-          accept="application/json,.json"
-          style={{ display: "none" }}
-          onChange={this.handleImportFileChange}
-        />
-      </div>
-
-      {/* Grid/background controls overlay */}
-      <div
-        data-bowtie-overlay="1"
-        style={{
-          position: "absolute",
-          top: 52, // just below the export/import bar
-          left: 8,
-          zIndex: 30,
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          background: "rgba(2,6,23,0.9)",
-          border: "1px solid rgba(148,163,184,0.4)",
-          borderRadius: 8,
-          padding: "6px 8px",
-          boxShadow: "0 6px 18px rgba(0,0,0,0.6)",
-        }}
-      >
-        <button
-          onClick={this.handleToggleGrid}
-          style={{
-            padding: "4px 8px",
-            fontSize: "0.8rem",
-            background: "#475569",
-            color: "white",
-            border: "none",
-            borderRadius: 6,
-            cursor: "pointer",
-          }}
-          title="Show / hide grid"
-        >
-          {this.state.showGrid ? "Hide dots" : "Show dots"}
-        </button>
-
-        <label
-          style={{
+            position: "absolute",
+            top: 52, // just below the export/import bar
+            left: 8,
+            zIndex: 30,
             display: "flex",
             alignItems: "center",
-            gap: 6,
-            fontSize: 12,
-            color: "#cbd5e1",
+            gap: 8,
+            background: "rgba(2,6,23,0.9)",
+            border: "1px solid rgba(148,163,184,0.4)",
+            borderRadius: 8,
+            padding: "6px 8px",
+            boxShadow: "0 6px 18px rgba(0,0,0,0.6)",
           }}
         >
-          Fill
-          <input
-            type="color"
-            value={this.state.bgColor}
-            onChange={this.handleBgColorChange}
+          <button
+            onClick={this.handleToggleGrid}
             style={{
-              width: 24,
-              height: 24,
+              padding: "4px 8px",
+              fontSize: "0.8rem",
+              background: "#475569",
+              color: "white",
               border: "none",
-              background: "transparent",
-              padding: 0,
+              borderRadius: 6,
+              cursor: "pointer",
             }}
-            title="Canvas background color"
-          />
-        </label>
+            title="Show / hide grid"
+          >
+            {this.state.showGrid ? "Hide dots" : "Show dots"}
+          </button>
 
-        <label
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            fontSize: 12,
-            color: "#cbd5e1",
-          }}
-        >
-          Grid
-          <input
-            type="color"
-            value={this.state.gridColor}
-            onChange={this.handleGridColorChange}
+          <label
             style={{
-              width: 24,
-              height: 24,
-              border: "none",
-              background: "transparent",
-              padding: 0,
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              fontSize: 12,
+              color: "#cbd5e1",
             }}
-            title="Dots/lines color"
+          >
+            Fill
+            <input
+              type="color"
+              value={this.state.bgColor}
+              onChange={this.handleBgColorChange}
+              style={{
+                width: 24,
+                height: 24,
+                border: "none",
+                background: "transparent",
+                padding: 0,
+              }}
+              title="Canvas background color"
+            />
+          </label>
+
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              fontSize: 12,
+              color: "#cbd5e1",
+            }}
+          >
+            Grid
+            <input
+              type="color"
+              value={this.state.gridColor}
+              onChange={this.handleGridColorChange}
+              style={{
+                width: 24,
+                height: 24,
+                border: "none",
+                background: "transparent",
+                padding: 0,
+              }}
+              title="Dots/lines color"
+            />
+          </label>
+
+          <select
+            value={this.state.bgVariant}
+            onChange={this.handleVariantChange}
+            style={{
+              fontSize: 12,
+              padding: "4px 6px",
+              borderRadius: 6,
+              background: "#0b1220",
+              color: "#e5e7eb",
+              border: "1px solid rgba(148,163,184,0.4)",
+            }}
+            title="Grid type"
+          >
+            <option value="dots">Dots</option>
+            <option value="lines">Lines</option>
+            <option value="cross">Cross</option>
+          </select>
+
+          <input
+            type="number"
+            min="4"
+            max="80"
+            step="2"
+            value={this.state.gridGap}
+            onChange={this.handleGridGapChange}
+            style={{
+              width: 58,
+              fontSize: 12,
+              padding: "4px 6px",
+              borderRadius: 6,
+              background: "#0b1220",
+              color: "#e5e7eb",
+              border: "1px solid rgba(148,163,184,0.4)",
+            }}
+            title="Grid spacing"
           />
-        </label>
 
-        <select
-          value={this.state.bgVariant}
-          onChange={this.handleVariantChange}
-          style={{
-            fontSize: 12,
-            padding: "4px 6px",
-            borderRadius: 6,
-            background: "#0b1220",
-            color: "#e5e7eb",
-            border: "1px solid rgba(148,163,184,0.4)",
-          }}
-          title="Grid type"
+          <input
+            type="number"
+            min="1"
+            max="6"
+            step="1"
+            value={this.state.gridSize}
+            onChange={this.handleGridSizeChange}
+            style={{
+              width: 48,
+              fontSize: 12,
+              padding: "4px 6px",
+              borderRadius: 6,
+              background: "#0b1220",
+              color: "#e5e7eb",
+              border: "1px solid rgba(148,163,184,0.4)",
+            }}
+            title="Dot size / line width"
+          />
+        </div>
+
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          nodeTypes={nodeTypes}
+          onNodesChange={this.onNodesChange}
+          onEdgesChange={this.onEdgesChange}
+          onConnect={this.onConnect}
+          onInit={this.onInit}
+          fitView
+          fitViewOptions={{ padding: 0.2 }}
+          panOnScroll
+          zoomOnScroll
+          zoomOnPinch
+          onPaneContextMenu={this.onPaneContextMenu}
+          onPaneClick={this.onPaneClick}
+          onNodeDoubleClick={this.onNodeDoubleClick}
+          onNodeContextMenu={this.onNodeContextMenu}
+          onEdgeContextMenu={this.onEdgeContextMenu}
         >
-          <option value="dots">Dots</option>
-          <option value="lines">Lines</option>
-          <option value="cross">Cross</option>
-        </select>
+          {this.state.showGrid && (
+            <Background
+              variant={this.state.bgVariant} // "dots" | "lines" | "cross"
+              gap={this.state.gridGap}
+              size={this.state.gridSize}
+              color={this.state.gridColor}
+            />
+          )}
 
-        <input
-          type="number"
-          min="4"
-          max="80"
-          step="2"
-          value={this.state.gridGap}
-          onChange={this.handleGridGapChange}
-          style={{
-            width: 58,
-            fontSize: 12,
-            padding: "4px 6px",
-            borderRadius: 6,
-            background: "#0b1220",
-            color: "#e5e7eb",
-            border: "1px solid rgba(148,163,184,0.4)",
-          }}
-          title="Grid spacing"
-        />
+          <MiniMap
+            pannable
+            zoomable
+            style={{
+              background: "#020617",
+              borderRadius: 8,
+              boxShadow: "0 6px 18px rgba(0,0,0,0.6)",
+            }}
+          />
 
-        <input
-          type="number"
-          min="1"
-          max="6"
-          step="1"
-          value={this.state.gridSize}
-          onChange={this.handleGridSizeChange}
-          style={{
-            width: 48,
-            fontSize: 12,
-            padding: "4px 6px",
-            borderRadius: 6,
-            background: "#0b1220",
-            color: "#e5e7eb",
-            border: "1px solid rgba(148,163,184,0.4)",
-          }}
-          title="Dot size / line width"
-        />
+          <Controls
+            position="top-right"
+            showZoom
+            showFitView
+            showInteractive={false}
+            style={{
+              backgroundColor: "#020617",
+              borderRadius: 8,
+              boxShadow: "0 6px 18px rgba(0,0,0,0.6)",
+              border: "1px solid rgba(148,163,184,0.5)",
+            }}
+          />
+        </ReactFlow>
+
+        {this.renderContextMenu()}
+        {this.renderEditPanel()}
+        {this.renderNodeMenu()}
+        {this.renderEdgeMenu()}
       </div>
-
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        nodeTypes={nodeTypes}
-        onNodesChange={this.onNodesChange}
-        onEdgesChange={this.onEdgesChange}
-        onConnect={this.onConnect}
-        onInit={this.onInit}
-        fitView
-        fitViewOptions={{ padding: 0.2 }}
-        panOnScroll
-        zoomOnScroll
-        zoomOnPinch
-        onPaneContextMenu={this.onPaneContextMenu}
-        onPaneClick={this.onPaneClick}
-        onNodeDoubleClick={this.onNodeDoubleClick}
-        onNodeContextMenu={this.onNodeContextMenu}
-        onEdgeContextMenu={this.onEdgeContextMenu}
-      >
-        {this.state.showGrid && (
-          <Background
-            variant={this.state.bgVariant} // "dots" | "lines" | "cross"
-            gap={this.state.gridGap}
-            size={this.state.gridSize}
-            color={this.state.gridColor}
-          />
-        )}
-
-        <MiniMap
-          pannable
-          zoomable
-          style={{
-            background: "#020617",
-            borderRadius: 8,
-            boxShadow: "0 6px 18px rgba(0,0,0,0.6)",
-          }}
-        />
-
-        <Controls
-          position="top-right"
-          showZoom
-          showFitView
-          showInteractive={false}
-          style={{
-            backgroundColor: "#020617",
-            borderRadius: 8,
-            boxShadow: "0 6px 18px rgba(0,0,0,0.6)",
-            border: "1px solid rgba(148,163,184,0.5)",
-          }}
-        />
-      </ReactFlow>
-
-      {this.renderContextMenu()}
-      {this.renderEditPanel()}
-      {this.renderNodeMenu()}
-      {this.renderEdgeMenu()}
-    </div>
-  );
-}
+    );
+  }
 
   handleExport() {
-  const payload = this.cleanForSave(this.state.nodes, this.state.rawEdges);
-  const json = JSON.stringify(payload, null, 2);
+    const payload = this.cleanForSave(this.state.nodes, this.state.rawEdges);
+    const json = JSON.stringify(payload, null, 2);
 
-  const blob = new Blob([json], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-
-  const ts = new Date();
-  const pad = (x) => String(x).padStart(2, "0");
-  const fname = `bowtie_diagram_${ts.getFullYear()}${pad(ts.getMonth()+1)}${pad(ts.getDate())}_${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}.json`;
-
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = fname;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
-
-handleImportClick() {
-  if (this.fileInputRef?.current) {
-    this.fileInputRef.current.value = ""; // reset so same file can be chosen again
-    this.fileInputRef.current.click();
-  }
-}
-
-handleImportFileChange(e) {
-  const file = e.target.files?.[0];
-  if (!file) return;
-
-  const reader = new FileReader();
-  reader.onload = () => {
-    try {
-      const parsed = JSON.parse(reader.result);
-
-      // Basic shape check
-      if (!Array.isArray(parsed?.nodes) || !Array.isArray(parsed?.edges)) {
-        console.error("Invalid file format.");
-        return;
-      }
-
-      // Ensure meta defaults; positions/types respected
-      const loadedNodes = parsed.nodes.map((n) => ({
-        id: n.id,
-        position: n.position || { x: 0, y: 0 },
-        type: n.type, // may be undefined (default node)
-        data: {
-          label: n.data?.baseLabel ?? n.data?.label ?? "",
-          baseLabel: n.data?.baseLabel ?? n.data?.label ?? "",
-          meta: { ...(n.data?.meta || {}) },
-        },
-      }));
-
-      const loadedEdges = parsed.edges.map((e) => ({
-        id: e.id,
-        source: e.source,
-        target: e.target,
-        sourceHandle: e.sourceHandle,
-        targetHandle: e.targetHandle,
-        type: e.type || "default",
-        data: e.data,
-      }));
-
-      // Recompute visuals & breach state from imported structure
-      const processed = this.recalcNodes(loadedNodes, loadedEdges, [], []);
-
-      this.setState(
-        (state) => ({
-          ...state,
-          nodes: processed.nodes,
-          edges: processed.edges,
-          rawEdges: loadedEdges,
-          collapsedThreats: [],
-          collapsedConsequences: [],
-        }),
-        this.pushToStreamlit
-      );
-    } catch (err) {
-      console.error("Failed to parse JSON:", err);
-    }
-  };
-  reader.readAsText(file);
-}
-
-handleToggleGrid() {
-  this.setState((s) => ({ showGrid: !s.showGrid }));
-}
-handleBgColorChange(e) {
-  this.setState({ bgColor: e.target.value });
-}
-handleGridColorChange(e) {
-  this.setState({ gridColor: e.target.value });
-}
-handleVariantChange(e) {
-  this.setState({ bgVariant: e.target.value });
-}
-handleGridGapChange(e) {
-  const v = Math.max(4, Math.min(80, Number(e.target.value) || 0));
-  this.setState({ gridGap: v });
-}
-handleGridSizeChange(e) {
-  const v = Math.max(1, Math.min(6, Number(e.target.value) || 0));
-  this.setState({ gridSize: v });
-}
-
-async handleSavePng() {
-  if (!this.canvasRef.current) return;
-
-  // filter out overlay UI (menus/toolbars) from the snapshot
-  const filter = (node) => {
-    if (!(node instanceof Element)) return true;
-    // exclude anything explicitly marked as overlay
-    if (node.closest('[data-bowtie-overlay="1"]')) return false;
-    // optional: exclude context menus by selector if you’d like
-    // if (node.closest('[data-bowtie-contextmenu="1"]')) return false;
-    return true;
-  };
-
-  try {
-    const dataUrl = await toPng(this.canvasRef.current, {
-      backgroundColor: this.state.bgColor, // keep current fill
-      pixelRatio: 2,                        // crisp export
-      cacheBust: true,
-      filter,
-    });
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
 
     const ts = new Date();
     const pad = (x) => String(x).padStart(2, "0");
-    const fname =
-      `bowtie_snapshot_` +
-      `${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(ts.getDate())}_` +
-      `${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}.png`;
+    const fname = `bowtie_diagram_${ts.getFullYear()}${pad(
+      ts.getMonth() + 1
+    )}${pad(ts.getDate())}_${pad(ts.getHours())}${pad(
+      ts.getMinutes()
+    )}${pad(ts.getSeconds())}.json`;
 
     const a = document.createElement("a");
-    a.href = dataUrl;
+    a.href = url;
     a.download = fname;
     document.body.appendChild(a);
     a.click();
     a.remove();
-  } catch (err) {
-    console.error("PNG export failed:", err);
+    URL.revokeObjectURL(url);
   }
-}
 
+  handleImportClick() {
+    if (this.fileInputRef?.current) {
+      this.fileInputRef.current.value = ""; // reset so same file can be chosen again
+      this.fileInputRef.current.click();
+    }
+  }
 
+  handleImportFileChange(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
 
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
 
+        // Basic shape check
+        if (!Array.isArray(parsed?.nodes) || !Array.isArray(parsed?.edges)) {
+          console.error("Invalid file format.");
+          return;
+        }
+
+        // Ensure meta defaults; positions/types respected
+        const loadedNodes = parsed.nodes.map((n) => ({
+          id: n.id,
+          position: n.position || { x: 0, y: 0 },
+          type: n.type, // may be undefined (default node)
+          data: {
+            label: n.data?.baseLabel ?? n.data?.label ?? "",
+            baseLabel: n.data?.baseLabel ?? n.data?.label ?? "",
+            meta: { ...(n.data?.meta || {}) },
+          },
+        }));
+
+        const loadedEdges = parsed.edges.map((e) => ({
+          id: e.id,
+          source: e.source,
+          target: e.target,
+          sourceHandle: e.sourceHandle,
+          targetHandle: e.targetHandle,
+          type: e.type || "default",
+          data: e.data,
+        }));
+
+        // Recompute visuals & breach state from imported structure
+        const processed = this.recalcNodes(loadedNodes, loadedEdges, [], []);
+
+        this.setState(
+          (state) => ({
+            ...state,
+            nodes: processed.nodes,
+            edges: processed.edges,
+            rawEdges: loadedEdges,
+            collapsedThreats: [],
+            collapsedConsequences: [],
+          }),
+          this.pushToStreamlit
+        );
+      } catch (err) {
+        console.error("Failed to parse JSON:", err);
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  handleToggleGrid() {
+    this.setState((s) => ({ showGrid: !s.showGrid }));
+  }
+  handleBgColorChange(e) {
+    this.setState({ bgColor: e.target.value });
+  }
+  handleGridColorChange(e) {
+    this.setState({ gridColor: e.target.value });
+  }
+  handleVariantChange(e) {
+    this.setState({ bgVariant: e.target.value });
+  }
+  handleGridGapChange(e) {
+    const v = Math.max(4, Math.min(80, Number(e.target.value) || 0));
+    this.setState({ gridGap: v });
+  }
+  handleGridSizeChange(e) {
+    const v = Math.max(1, Math.min(6, Number(e.target.value) || 0));
+    this.setState({ gridSize: v });
+  }
+
+  async handleSavePng() {
+    if (!this.canvasRef.current) return;
+
+    // filter out overlay UI (menus/toolbars) from the snapshot
+    const filter = (node) => {
+      if (!(node instanceof Element)) return true;
+      // exclude anything explicitly marked as overlay
+      if (node.closest('[data-bowtie-overlay="1"]')) return false;
+      return true;
+    };
+
+    try {
+      const dataUrl = await toPng(this.canvasRef.current, {
+        backgroundColor: this.state.bgColor, // keep current fill
+        pixelRatio: 2, // crisp export
+        cacheBust: true,
+        filter,
+      });
+
+      const ts = new Date();
+      const pad = (x) => String(x).padStart(2, "0");
+      const fname =
+        `bowtie_snapshot_` +
+        `${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(
+          ts.getDate()
+        )}_` +
+        `${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(
+          ts.getSeconds()
+        )}.png`;
+
+      const a = document.createElement("a");
+      a.href = dataUrl;
+      a.download = fname;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch (err) {
+      console.error("PNG export failed:", err);
+    }
+  }
 }
 
 const Wrapped = withStreamlitConnection(BowtieFlowComponent);
